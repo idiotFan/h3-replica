@@ -1,6 +1,10 @@
 // ================= 主控制器 =================
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { MAP, UNITS, MINES, ARTIFACTS, SKILLS } from './config.js';
 import { DIFF, setDifficulty, getDifficultyKey } from './difficulty.js';
 import { Tweens, initAudio, sfx, clamp, setMuted, startBgm, stopBgm } from './utils.js';
@@ -74,6 +78,31 @@ const state = {
 const mapScene = new THREE.Scene();
 let battleScene = null;
 let battle = null;
+
+// ---------- PMREM 环境贴图（让金属/盔甲有真实反射，告别塑料感）----------
+const pmrem = new THREE.PMREMGenerator(renderer);
+pmrem.compileEquirectangularShader();
+// 用程序化天空+半球光生成环境贴图，无需加载 HDR 文件
+const _envScene = new THREE.Scene();
+_envScene.background = new THREE.Color(0x87b5e0);
+_envScene.add(new THREE.HemisphereLight(0xcfe8ff, 0x3d5a3a, 1.0));
+const envMap = pmrem.fromScene(_envScene, 0.04).texture;
+pmrem.dispose();
+mapScene.environment = envMap;
+
+// ---------- 后期处理（Bloom：让发光眼/窗口/法术更亮更酷）----------
+const composer = new EffectComposer(renderer);
+const renderPass = new RenderPass(mapScene, camera);
+composer.addPass(renderPass);
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  0.5,   // strength：发光强度
+  0.4,   // radius：扩散半径
+  0.85,  // threshold：只让亮度>0.85 的部分发光（emissive 元素）
+);
+composer.addPass(bloomPass);
+composer.addPass(new OutputPass());
+let bloomEnabled = true; // 按画质动态开关
 
 // ---------- UI ----------
 const ui = new UI({
@@ -325,6 +354,8 @@ function applyQuality() {
   renderer.shadowMap.enabled = !low;
   // 阴影贴图按画质分级：low 关闭 / medium 1024 / high 2048
   const shadowSize = low ? 0 : (q === 'medium' ? 1024 : 2048);
+  // Bloom 后期处理：low 关闭省 GPU / medium+ 开启
+  bloomEnabled = !low;
   for (const sc of [mapScene, battleScene]) {
     if (!sc) continue;
     sc.traverse(o => {
@@ -403,6 +434,7 @@ function startBattle(encounterObj) {
   world._undoState = null;
   ui.setUndoAvailable(false);
   battleScene = new THREE.Scene();
+  battleScene.environment = envMap; // 战场也用环境贴图，金属反射一致
   const enemyArmy = encounterObj.data.stacks.map(s => ({ ...s }));
   // 敌方英雄/城堡给予敌军属性加成
   let enemyHero = { atk: 0, def: 0 };
@@ -768,6 +800,8 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
+  bloomPass.setSize(window.innerWidth, window.innerHeight);
 });
 
 // ---------- 主循环 ----------
@@ -785,7 +819,7 @@ function loop() {
       camera.position.set(Math.cos(t) * 58, 36, Math.sin(t) * 58);
       camera.lookAt(0, 0, 0);
     }
-    renderer.render(mapScene, camera);
+    if (bloomEnabled) composer.render(); else renderer.render(mapScene, camera);
   } else if (state.mode === 'map') {
     world.update(dt);
     // WASD / 方向键平移：target 与 camera 同步平移，避免 OrbitControls 抵消
@@ -821,11 +855,13 @@ function loop() {
     }
     if (minimap) minimap.update(dt);
     controls.update();
-    renderer.render(mapScene, camera);
+    renderPass.scene = mapScene; // 确保后期处理在大地图场景
+    if (bloomEnabled) composer.render(); else renderer.render(mapScene, camera);
   } else if (state.mode === 'battle' && battle) {
     battle.update(dt, camera);
     controls.update();
-    renderer.render(battleScene, camera);
+    renderPass.scene = battleScene; // 切换后期处理到战场场景
+    if (bloomEnabled) composer.render(); else renderer.render(battleScene, camera);
   }
   if (SMOKE && ++smokeFrames === 45) {
     const d = document.getElementById('smoke');
