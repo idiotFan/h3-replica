@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>英雄无敌 3D · Three.js</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 2 L28 7 V16 C28 24 22 29 16 31 C10 29 4 24 4 16 V7 Z' fill='%23c8a951'/%3E%3Cpath d='M16 5 L25 9 V16 C25 22 20 26 16 28 C12 26 7 22 7 16 V9 Z' fill='%23241c0e'/%3E%3Cpath d='M16 8 L19 13 L16 24 L13 13 Z' fill='%23ffd76b'/%3E%3C/svg%3E">
+<!-- 字体走国内可达的 Google Fonts 镜像（loli.net），display=swap 保证加载慢时立即用系统字体兜底 -->
+<link rel="preconnect" href="https://fonts.loli.net">
+<link rel="preconnect" href="https://gstatic.loli.net" crossorigin>
+<link href="https://fonts.loli.net/css2?family=Ma+Shan+Zheng&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="game"></div>
+<div id="vignette"></div>
+<div id="loading"><div class="load-inner"><div class="load-title">英雄无敌 3D</div><div class="load-bar"><div class="load-fill"></div></div><div class="load-tip">正在加载大陆…</div></div></div>
+
+<!-- 顶部资源栏 -->
+<div id="topbar" class="hidden">
+  <span id="day" class="tb-day">第 1 天</span>
+  <div class="tb-res">
+    <span class="res"><i class="dot gold"></i>金币 <b id="r-gold">0</b></span>
+    <span class="res"><i class="dot wood"></i>木材 <b id="r-wood">0</b></span>
+    <span class="res"><i class="dot ore"></i>矿石 <b id="r-ore">0</b></span>
+  </div>
+  <div class="tb-right">
+    <button id="btn-settings" class="btn-gold btn-icon">设置</button>
+    <button id="btn-endturn" class="btn-gold">结束回合 (空格)</button>
+  </div>
+</div>
+
+<!-- 英雄栏（地图模式） -->
+<div id="herobar" class="hidden ornate">
+  <div id="hero-info"></div>
+  <div id="army"></div>
+  <div id="mp-bar"><div id="mp-fill"></div><span id="mp-text"></span></div>
+</div>
+
+<!-- 战场栏（战斗模式） -->
+<div id="battlebar" class="hidden">
+  <div class="bb-top">
+    <div id="round-ind">第 1 回合</div>
+    <div id="queue"></div>
+    <div id="active-info"></div>
+  </div>
+  <div class="bb-bottom">
+    <div class="b-actions">
+      <button id="btn-wait" class="btn-gold">等待 (W)</button>
+      <button id="btn-defend" class="btn-gold">防御 (D)</button>
+      <button id="btn-spell" class="btn-gold">魔法书 (S)</button>
+      <button id="btn-retreat" class="btn-gold btn-danger">撤退 (R)</button>
+    </div>
+  </div>
+  <div id="battle-hint"></div>
+</div>
+
+<div id="hint" class="hidden">WASD/方向键平移地图 · 左键点击移动/交互 · 右键拖拽平移 · 拖拽旋转 · 滚轮缩放</div>
+
+<div id="toasts"></div>
+<div id="floaters"></div>
+<div id="labels"></div>
+<div id="minimap" class="hidden"></div>
+<div id="battle-log" class="hidden ornate"></div>
+<div id="tooltip" class="hidden"></div>
+
+<div id="modal" class="hidden"><div id="modal-box" class="ornate"></div></div>
+
+<!-- 开始画面 -->
+<div id="start-screen">
+  <div class="start-box">
+    <h1>英雄无敌 <span>3D</span></h1>
+    <p class="sub">Three.js 复刻 · 大地图探索 + 六边形战场</p>
+    <div class="start-help">
+      <p>率领你的军队在大陆上探索：收集资源、占领矿场、拾取宝物、招募部队。<br>
+      野怪会<b>拦截</b>踏入其警戒范围（周围一圈）的英雄，且<b>每 3 天增长兵力</b>——清怪别拖太久！</p>
+      <p>小心北方的<b>敌方阵营</b>：敌方英雄会在地图上游荡追击你，敌方城堡每 5 天派出援军——尽早摧毁它！</p>
+      <p>击败东北角的<b>黑龙巢穴</b>即可赢得胜利；全军覆没则失败。</p>
+      <p class="keys">操作：点击移动 / 进攻 · 空格结束回合 · 战斗中 W等待 D防御 S魔法书 R撤退<br>
+      升级获得技能点学习技能 · 城堡可升级兵营招募精锐部队<br>
+      右下角小地图点击查看全图 · 每回合自动存档</p>
+    </div>
+    <div class="diff-row">
+      <span class="diff-tip">选择难度开始</span>
+      <div class="start-btns">
+        <button data-diff="easy" class="btn-gold big">简单</button>
+        <button data-diff="normal" class="btn-gold big">普通</button>
+        <button data-diff="hard" class="btn-gold big">困难</button>
+      </div>
+    </div>
+    <div class="start-btns">
+      <button id="btn-continue-save" class="btn-gold big hidden">继续游戏</button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

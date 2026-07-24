@@ -1,0 +1,16 @@
+{
+  "name": "homm-3d",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Three.js 3D 版英雄无敌：大地图探索 + 六边形战场回合制战斗",
+  "scripts": {
+    "start": "python3 -m http.server 8000",
+    "gen:glb": "node scripts/gen_glb.mjs",
+    "gen:blender": "blender --background --python scripts/blender_export_models.py",
+    "deploy": "./scripts/deploy.sh"
+  },
+  "dependencies": {
+    "three": "^0.160.0"
+  }
+}
