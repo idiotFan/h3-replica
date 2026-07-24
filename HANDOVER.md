@@ -2,6 +2,7 @@
 
 > Three.js 复刻《英雄无敌3》：异形岛屿大地图探索 + 六边形回合制战场 + 英雄成长 + 敌方阵营 AI  
 > 线上：**https://h3.idiotfan.wang**  
+> 仓库：**https://gitee.com/idiotfan/h3-replica**（master 分支）
 > 技术栈：Three.js r160（CDN + importmap）· 纯 ES Module · 零构建 · Blender glb 资产
 
 ---
@@ -50,7 +51,7 @@ md5 -q js/main.js; curl -s https://h3.idiotfan.wang/js/main.js | md5
 node tests/homm_smoke.mjs "https://h3.idiotfan.wang/?smoke=map" 60
 ```
 
-**回滚须知**：`rsync --delete` 会让服务器与本地完全一致，服务器上**没有历史版本**；项目目前也没有 git——回滚唯一手段是把本地恢复到旧状态再发布（建模脚本有 `.bak*` 备份可用）。强烈建议尽早 `git init` 补上版本控制。
+**回滚须知**：`rsync --delete` 会让服务器与本地完全一致，服务器上**没有历史版本**；项目已纳入 git 版本控制（仓库 https://gitee.com/idiotfan/h3-replica，master 分支），可用 `git checkout <commit>` 回到历史版本再发布。建模脚本另有 `.bak*` 备份可用。
 
 线上由 nginx 静态托管 + Let's Encrypt SSL（certbot 自动续期）。nginx 配置在 VPS `/etc/nginx/sites-available/h3.idiotfan.wang`，网站根目录 `/var/www/h3`。
 
@@ -71,6 +72,8 @@ node tests/homm_shot.mjs "http://localhost:8000/?smoke=battle" 12 /tmp/shot.png 
 ```
 K3版H3/
 ├── index.html               # 入口页（importmap + UI 骨架 + 加载画面）
+├── manifest.json            # PWA 清单（应用名/图标/主题色，支持"添加到主屏幕"）
+├── sw.js                    # Service Worker（本地资源 cache-first、CDN stale-while-revalidate）
 ├── css/style.css            # 全部样式（CSS 变量 + 响应式 + 移动端）
 ├── js/
 │   ├── config.js            # ★ 单位/法术/技能/宝物/地图尺寸等基础定义（不随难度变）
@@ -78,14 +81,14 @@ K3版H3/
 │   ├── utils.js             # 噪声/缓动/Tween/六边形数学/音效/资源释放
 │   ├── textures.js          # 程序化纹理（地面噪点/水面波纹/天空穹顶/云/太阳月亮）
 │   ├── models.js            # ★ 原语模型工厂（glb 加载失败时的回退）
-│   ├── map.js               # ★ 冒险大地图（地形/寻路/对象/敌方 AI/日夜循环/序列化）
-│   ├── battle.js            # ★ 六边形战场（回合/伤害/技能/法术/粒子/特效/AI）
-│   ├── ui.js                # ★ DOM UI（资源栏/英雄栏/战场栏/模态框/魔法书/CG）
-│   ├── minimap.js           # 小地图（Canvas 2D 绘制 + 视窗框）
-│   ├── main.js              # ★ 主控制器（渲染器/相机/输入/状态/部署/启动流程）
+│   ├── map.js               # ★ 冒险大地图（地形/寻路/对象/敌方 AI/日夜循环/序列化/战争迷雾/书签）
+│   ├── battle.js            # ★ 六边形战场（回合/伤害/技能/法术/粒子/特效/AI/结算动画）
+│   ├── ui.js                # ★ DOM UI（资源栏/英雄栏/战场栏/模态框/魔法书/CG/新手引导）
+│   ├── minimap.js           # 小地图（Canvas 2D 绘制 + 视窗框 + 迷雾同步）
+│   ├── main.js              # ★ 主控制器（渲染器/PMREM/Bloom/相机/输入/状态/部署/启动流程）
 │   └── assets/
 │       ├── manifest.js      # glb 资产清单（path ↔ unit key 映射）
-│       ├── loader.js        # GLTFLoader 封装（缓存/预加载/失败回退）
+│       ├── loader.js        # GLTFLoader 封装（缓存/分阶段懒加载/失败回退）
 │       └── factory.js       # 统一工厂（glb 优先，回退 models.js 原语）
 ├── art/export/              # 22 个 glb 模型（Blender 导出）
 │   ├── units/               # 15 兵种（5 基础 + 5 精锐 + 5 野怪）
@@ -96,6 +99,7 @@ K3版H3/
 │   ├── gen_glb.mjs               # Node 备用导出
 │   └── deploy.sh                 # 一键部署
 ├── ART_SPEC.md              # 美术规范（面数/贴图/动画/命名/优先级）
+├── HANDOVER.md              # 本文档（不公开到线上，deploy.sh 排除）
 └── package.json
 ```
 
@@ -195,6 +199,12 @@ ui.js（DOM 更新）          ui.js（战场 UI）
 - 改不随难度变的基础数值（单位属性/法术耗魔/技能上限/地图尺寸）→ 编辑 `js/config.js`
 - `DIFF` 是 `export let`，各模块 `import { DIFF }` 后通过 ES module live binding 读到最新值；`setDifficulty(key)` 必须在构建世界/英雄前调用
 
+### 4.6 渲染管线（main.js）★ 2026-07-23 新增
+- **PMREM 环境贴图**：`PMREMGenerator.fromScene()` 用程序化天空+半球光预卷积环境贴图，赋值给 `mapScene.environment` 和 `battleScene.environment`；PBR 材质（金属盔甲/铁器/金边）自动获得真实环境反射，告别"塑料纯色"观感
+- **Bloom 后期处理**：`EffectComposer` + `RenderPass` + `UnrealBloomPass` + `OutputPass`；`threshold 0.85` 只让 emissive 元素发光（龙眼/骷髅眼/幽灵眼/城堡窗口/金矿水晶/法术特效）；low 画质自动关闭省 GPU，medium/high 开启
+- **场景切换**：`renderPass.scene` 在 `loop()` 内按 `state.mode` 动态切换 mapScene/battleScene，确保后期处理作用于当前活跃场景
+- **画质分级**：`applyQuality()` 控制 shadow map（low 0 / medium 1024 / high 2048）+ Bloom 开关 + pixelRatio
+
 ---
 
 ## 五、关键约定
@@ -231,6 +241,7 @@ ui.js（DOM 更新）          ui.js（战场 UI）
 - **战绩存档**：`localStorage['homm3d_records']` 保存最近 10 局，胜利 CG 显示最佳通关记录
 
 ### 2026-07-23 体验优化（已上线）
+- **美术+性能优化**：① PMREM 环境贴图——金属盔甲/铁器/金边获得真实环境反射，告别塑料纯色；② Bloom 后期处理——`threshold 0.85` 只让 emissive 元素发光（龙眼橙红/骷髅眼绿/幽灵眼青/城堡窗口暖黄/金矿水晶/法术特效），low 画质自动关闭省 GPU；③ 确认装饰物已是 InstancedMesh（树 trunk+leaf + 石头各 1 draw call）、1600 地块单 PlaneGeometry、战场六边形 InstancedMesh，draw call 已压到个位数
 - **资源懒加载**：`loader.js` 分阶段加载——启动只加载核心资产（英雄+城堡+初始兵种+矿场 8 个 glb），后台加载剩余 14 个（野怪+敌方+精锐）；`world.refreshObjectMeshes()` 在后台加载完成后自动替换原语回退模型；首屏等待时间减半
 - **PWA 离线**：`manifest.json` + `sw.js`，支持"添加到主屏幕"当 App 用；本地资源 cache-first、CDN stale-while-revalidate；仅 https 生效（localhost 跳过避免开发干扰）
 - **撤销移动**：`map.js undoMove()` + `#btn-undo` 按钮，移动完成后显示，只能撤销最后一次移动；进入战斗/结束回合后清空
@@ -291,17 +302,18 @@ __game.readSave()                        // 读取存档
 
 | 文件 | 行数 | 说明 |
 |------|------|------|
-| map.js | ~1090 | 最大文件，含地形/寻路/对象/敌方 AI/日夜/序列化 |
-| battle.js | ~1090 | 战场引擎 + 粒子 + 特效 |
-| main.js | ~760 | 主控制器 + 输入 + 启动 |
-| ui.js | ~460 | DOM UI |
+| map.js | ~1090 | 最大文件，含地形/寻路/对象/敌方 AI/日夜/序列化/战争迷雾/书签 |
+| battle.js | ~1090 | 战场引擎 + 粒子 + 特效 + 结算动画 |
+| main.js | ~870 | 主控制器 + PMREM + Bloom + 输入 + 启动 |
+| ui.js | ~460 | DOM UI + 新手引导 |
 | models.js | ~430 | 原语回退模型 |
 | blender_export_models.py | ~620 | Blender 脚本 |
 | style.css | ~370 | 样式 |
 | config.js | ~80 | 基础定义（不随难度变的数值） |
 | difficulty.js | ~125 | 难度数值体系（easy/normal/hard 三档） |
-| **合计** | **~6200** | |
+| sw.js | ~60 | PWA Service Worker |
+| **合计** | **~6300** | |
 
 ---
 
-*文档版本：2026-07-23 · 与代码库当前状态同步（含美术优化三轮、难度数值体系抽取与三档难度、全局平衡修正、战争迷雾、新手引导、BGM、战绩存档、发布流程）*
+*文档版本：2026-07-23 · 与代码库当前状态同步（含 PMREM 环境反射 + Bloom 后期处理、美术优化三轮、难度数值体系抽取与三档难度、全局平衡修正、战争迷雾、新手引导、BGM、战绩存档、PWA 离线、撤销移动、存档导出导入、战斗结算动画、地图书签、音效补全、git 版本控制、发布流程）*
