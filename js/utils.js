@@ -141,6 +141,30 @@ function tone(f0, f1, dur, type = 'square', vol = 0.15, delay = 0) {
   o.connect(g); g.connect(AC.destination);
   o.start(t); o.stop(t + dur + 0.05);
 }
+function noiseBurst(dur, vol = 0.15, delay = 0, { type = 'lowpass', freq = 0, freq2 = 0, q = 1 } = {}) {
+  if (!AC) return;
+  const t = AC.currentTime + delay;
+  const sr = AC.sampleRate;
+  const buf = AC.createBuffer(1, Math.max(1, Math.floor(sr * dur)), sr);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+  const src = AC.createBufferSource();
+  src.buffer = buf;
+  const g = AC.createGain();
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  let last = src;
+  if (freq > 0) {
+    const f = AC.createBiquadFilter();
+    f.type = type;
+    f.Q.value = q;
+    f.frequency.setValueAtTime(Math.max(1, freq), t);
+    if (freq2 > 0) f.frequency.exponentialRampToValueAtTime(Math.max(1, freq2), t + dur);
+    src.connect(f); last = f;
+  }
+  last.connect(g); g.connect(AC.destination);
+  src.start(t); src.stop(t + dur + 0.05);
+}
 export function sfx(kind) {
   if (!AC || MUTED) return;
   switch (kind) {
@@ -148,7 +172,16 @@ export function sfx(kind) {
     case 'shoot':  tone(900, 300, 0.12, 'sawtooth', 0.12); break;
     case 'magic':  tone(300, 1200, 0.35, 'sine', 0.2); tone(600, 1800, 0.3, 'sine', 0.1, 0.05); break;
     case 'pickup': tone(660, 660, 0.08, 'sine', 0.15); tone(990, 990, 0.12, 'sine', 0.15, 0.09); break;
-    case 'move':   tone(180, 140, 0.06, 'triangle', 0.08); break;
+    case 'move':     noiseBurst(0.08, 0.1, 0, { type: 'lowpass', freq: 500 }); noiseBurst(0.08, 0.1, 0.1, { type: 'lowpass', freq: 500 }); break;
+    case 'attack':   tone(800, 400, 0.12, 'square', 0.15); noiseBurst(0.1, 0.08, 0, { type: 'bandpass', freq: 2000, q: 2 }); break;
+    case 'hurt':     tone(200, 80, 0.18, 'triangle', 0.18); noiseBurst(0.18, 0.1, 0, { type: 'lowpass', freq: 800 }); break;
+    case 'spell':    tone(400, 1200, 0.4, 'sine', 0.15); tone(800, 2400, 0.35, 'sine', 0.07, 0.05); tone(1200, 3600, 0.3, 'sine', 0.04, 0.1); break;
+    case 'death':    tone(300, 50, 0.5, 'triangle', 0.2); break;
+    case 'block':    tone(1500, 1200, 0.06, 'square', 0.12); noiseBurst(0.06, 0.05, 0, { type: 'highpass', freq: 2000 }); break;
+    case 'turn':     tone(660, 660, 0.15, 'sine', 0.12); break;
+    case 'select':   tone(880, 880, 0.05, 'sine', 0.1); break;
+    case 'arrow':    noiseBurst(0.2, 0.1, 0, { type: 'bandpass', freq: 3000, freq2: 800, q: 1 }); tone(1500, 800, 0.08, 'square', 0.06, 0.02); break;
+    case 'fireball': noiseBurst(0.35, 0.12, 0, { type: 'lowpass', freq: 600 }); tone(300, 100, 0.35, 'sawtooth', 0.12); break;
     case 'level':  [523, 659, 784].forEach((f, i) => tone(f, f, 0.12, 'sine', 0.15, i * 0.1)); break;
     case 'win':    [523, 659, 784, 1046].forEach((f, i) => tone(f, f, 0.16, 'triangle', 0.18, i * 0.12)); break;
     case 'lose':   [400, 300, 200, 120].forEach((f, i) => tone(f, f, 0.25, 'sawtooth', 0.12, i * 0.18)); break;

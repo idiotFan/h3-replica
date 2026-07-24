@@ -154,7 +154,7 @@ ui.js（DOM 更新）          ui.js（战场 UI）
 
 ### 4.3 资产管线（assets/）
 - `manifest.js`：每个单位 key 对应一个 glb path，`path: null` 时回退原语
-- `loader.js`：启动时 `preloadAllAssets()` 预加载全部 glb，加载条显示进度
+- `loader.js`：**分阶段懒加载**——启动只加载核心资产（玩家英雄+城堡+初始兵种+矿场），进入游戏后后台加载野怪+敌方+精锐兵种；`preloadGroup(groups)` 按分组加载，`getBootAssets()/getBackgroundAssets()` 返回两组清单；加载完成后 `world.refreshObjectMeshes()` 自动把原语回退的对象替换为 glb
 - `factory.js`：`createUnit(type, side)` → 有 glb 用 glb（clone + 队伍色 + 底座环），否则 `makeUnit(type, side)`
 - **队伍色**：glb 中名为 `TeamColor` 的网格/材质自动替换为蓝/红
 - **翅膀/旗帜**：名为 `WingL/WingR/Flag` 的节点自动绑定待机动画
@@ -221,14 +221,31 @@ ui.js（DOM 更新）          ui.js（战场 UI）
 | P2 | 法术等级 | 所有法术从开始可用，应绑定魔法塔等级 |
 | P2 | 战斗 AI | 当前只射最近/走最近，缺优先击杀低血/利用障碍 |
 | P3 | LOD | 大地图单位用 LOD1，战场用 LOD0 |
-| P3 | 音效丰富化 | 已有程序化 BGM（五声音阶循环）+ 8 种合成音效，可换音效文件提升品质 |
+| P3 | 音效丰富化 | 已有程序化 BGM（五声音阶循环）+ 18 种合成音效（含 attack/hurt/spell/move/death/block/turn/select/arrow/fireball），可换音效文件提升品质 |
 
 ### 2026-07-23 成品向优化（已上线）
-- **战争迷雾**：`fogBlack`(未探索全黑) + `fogDim`(已探索不可见半透明) 双层 InstancedMesh；视野半径随移动力；对象与敌方英雄按可见性显隐；小地图同步迷雾；存档持久化 `explored`
+- **战争迷雾**：单张 CanvasTexture 平面（SS=16 超采样 + Mipmap 双线性过滤）覆盖全图；径向渐变 destination-out 擦出软边圆形视野；未探索 alpha 0.97 近不透明、已探索 0.52 半透明、可见完全透明；`depthTest:false` 确保雾始终覆盖最上层；视野半径随移动力；对象与敌方英雄按可见性显隐；小地图同步迷雾；存档持久化 `explored`
 - **新手引导**：`ui.guide()` 长停留可关闭浮层，按 enter/firstWin/castle 三个里程碑首次触发（`localStorage['homm3d_guide']`）
 - **移动端战斗日志**：`#battle-log.mobile-show` 紧凑横条，有内容时显示
 - **BGM**：`utils.startBgm()/stopBgm()` 程序化五声音阶循环，进入地图开始、静音时停止
 - **战绩存档**：`localStorage['homm3d_records']` 保存最近 10 局，胜利 CG 显示最佳通关记录
+
+### 2026-07-23 体验优化（已上线）
+- **资源懒加载**：`loader.js` 分阶段加载——启动只加载核心资产（英雄+城堡+初始兵种+矿场 8 个 glb），后台加载剩余 14 个（野怪+敌方+精锐）；`world.refreshObjectMeshes()` 在后台加载完成后自动替换原语回退模型；首屏等待时间减半
+- **PWA 离线**：`manifest.json` + `sw.js`，支持"添加到主屏幕"当 App 用；本地资源 cache-first、CDN stale-while-revalidate；仅 https 生效（localhost 跳过避免开发干扰）
+- **撤销移动**：`map.js undoMove()` + `#btn-undo` 按钮，移动完成后显示，只能撤销最后一次移动；进入战斗/结束回合后清空
+- **存档导出/导入**：设置弹窗加导出/导入按钮，导出下载 JSON 文件，导入校验格式后写 localStorage 刷新生效
+- **阴影贴图降级**：`applyQuality` 按画质分级 shadow map（low 0 / medium 1024 / high 2048），减少移动端 GPU 压力
+- **战斗结算动画**：`battle.js playEndCinematic()` 慢镜头（timeScale 0.3）1.5 秒 + 金/红粒子（THREE.Points 50 粒子加法混合），胜利 sfx('win') 失败 sfx('lose')
+- **地图书签**：长按地块 500ms 标记/取消书签，黄色旋转圆环标记 + 小地图菱形图标；持久化到存档
+- **音效补全**：新增 attack/hurt/spell/move(脚步)/death/block/turn/select/arrow/fireball 共 10 个程序化合成音效，`utils.js noiseBurst()` 辅助噪声合成
+- **版本控制**：已 `git init`，`.gitignore` 排除 node_modules/.DS_Store/*.log 等
+
+### 评估后跳过的优化项
+- **LOD 分级**：地块是单一 PlaneGeometry（非 InstancedMesh 无法单独 LOD），战场单位数量少（≤20），ROI 低
+- **KTX2 贴图压缩**：所有纹理是程序化 CanvasTexture 运行时生成，KTX2 离线压缩格式不适用
+- **map.js 拆分**：高风险重构，当前 1300+ 行虽大但结构清晰，拆分易引入回归
+- **i18n 国际化**：工作量大（所有 UI 文案 key 化），当前用户群体为中文，暂不优先
 
 ---
 

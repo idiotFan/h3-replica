@@ -63,14 +63,13 @@ export function cloneGltfScene(gltf) {
 }
 
 /**
- * 预加载 manifest 中所有已配置 path 的资源
+ * 预加载指定资源定义列表（按需加载）
+ * @param {Array<{path:string}>} defs 资产定义数组
  * @param {(ratio:number, label:string)=>void} [onProgress]
  */
-export async function preloadAllAssets(onProgress) {
+export async function preloadAssets(defs, onProgress) {
   const paths = new Set();
-  for (const def of Object.values(UNIT_ASSETS)) if (hasGlb(def)) paths.add(def.path);
-  for (const def of Object.values(HERO_ASSETS)) if (hasGlb(def)) paths.add(def.path);
-  for (const def of Object.values(BUILDING_ASSETS)) if (hasGlb(def)) paths.add(def.path);
+  for (const def of defs) if (def && hasGlb(def)) paths.add(def.path);
   const list = [...paths];
   if (!list.length) {
     onProgress?.(1, '使用程序化模型');
@@ -84,6 +83,60 @@ export async function preloadAllAssets(onProgress) {
     onProgress?.(done / list.length, `加载模型 ${done}/${list.length}`);
   })));
   return { total: list.length, ok };
+}
+
+/**
+ * 预加载 manifest 中所有已配置 path 的资源
+ * @param {(ratio:number, label:string)=>void} [onProgress]
+ */
+export async function preloadAllAssets(onProgress) {
+  const defs = [
+    ...Object.values(UNIT_ASSETS),
+    ...Object.values(HERO_ASSETS),
+    ...Object.values(BUILDING_ASSETS),
+  ];
+  return preloadAssets(defs, onProgress);
+}
+
+/**
+ * 预加载一组单位类型对应的资产（用于按需加载）
+ * @param {string[]} unitTypes UNITS key 列表
+ */
+export async function preloadUnits(unitTypes) {
+  const defs = unitTypes.map(t => UNIT_ASSETS[t]).filter(Boolean);
+  return preloadAssets(defs);
+}
+
+/** 启动时必需的核心资产（玩家英雄+城堡+初始兵种+矿场） */
+export function getBootAssets() {
+  return {
+    units: ['pikeman', 'archer', 'griffin', 'swordsman'],
+    heroes: ['player'],
+    buildings: ['castle_player', 'mine_sawmill', 'mine_ore', 'mine_gold'],
+  };
+}
+
+/** 后台预加载剩余资产（野怪+敌方+精锐兵种） */
+export function getBackgroundAssets() {
+  return {
+    units: ['champion', 'pikeman2', 'archer2', 'griffin2', 'swordsman2', 'champion2',
+            'wolf', 'skeleton', 'orc', 'ghost', 'dragon'],
+    heroes: ['enemy'],
+    buildings: ['castle_enemy'],
+  };
+}
+
+/**
+ * 按分组预加载资产
+ * @param {{units?:string[], heroes?:string[], buildings?:string[]}} groups
+ * @param {(ratio:number, label:string)=>void} [onProgress]
+ */
+export async function preloadGroup(groups, onProgress) {
+  const defs = [];
+  if (groups.units) for (const t of groups.units) if (UNIT_ASSETS[t]) defs.push(UNIT_ASSETS[t]);
+  if (groups.heroes) for (const h of groups.heroes) if (HERO_ASSETS[h]) defs.push(HERO_ASSETS[h]);
+  if (groups.buildings) for (const b of groups.buildings) if (BUILDING_ASSETS[b]) defs.push(BUILDING_ASSETS[b]);
+  return preloadAssets(defs, onProgress);
 }
 
 export function getCached(path) {

@@ -27,6 +27,9 @@ export class UI {
     this.els.btnWait.onclick = () => handlers.onWait();
     this.els.btnDefend.onclick = () => handlers.onDefend();
     this.els.btnSpell.onclick = () => handlers.onSpell();
+    // 撤销移动按钮
+    const btnUndo = $('btn-undo');
+    if (btnUndo) btnUndo.onclick = () => handlers.onUndo && handlers.onUndo();
     // 难度选择按钮（3 档），点击即以该难度开始新游戏
     document.querySelectorAll('button[data-diff]').forEach(btn => {
       btn.onclick = () => handlers.onStart(btn.dataset.diff);
@@ -85,6 +88,12 @@ export class UI {
       if (mode === 'battle') log.innerHTML = '';
     }
     if (mode !== 'battle') { this.els.labels.innerHTML = ''; this.closeSpellMenu(); this.hideTooltip(); }
+  }
+
+  // 控制撤销移动按钮显隐
+  setUndoAvailable(available) {
+    const btn = $('btn-undo');
+    if (btn) btn.classList.toggle('hidden', !available);
   }
 
   // ---------- 提示 ----------
@@ -351,7 +360,7 @@ export class UI {
   }
 
   // ---------- 设置 ----------
-  openSettings({ muted, quality, onMute, onQuality }) {
+  openSettings({ muted, quality, onMute, onQuality, onExport, onImport }) {
     this.openModal(
       `<div class="modal-title">设置</div>
        <div class="set-row">
@@ -364,6 +373,14 @@ export class UI {
            <button data-q="high" class="btn-gold ${quality === 'high' ? 'q-on' : ''}">高（阴影+高清）</button>
            <button data-q="low" class="btn-gold ${quality === 'low' ? 'q-on' : ''}">低（流畅省电）</button>
          </div>
+       </div>
+       <div class="set-row">
+         <span>存档</span>
+         <div class="set-q">
+           <button id="set-export" class="btn-gold">导出存档</button>
+           <button id="set-import" class="btn-gold">导入存档</button>
+         </div>
+         <input type="file" id="set-import-file" accept="application/json,.json" hidden>
        </div>
        <div class="modal-btns"><button id="btn-close-modal" class="btn-gold">关闭</button></div>`
     );
@@ -379,6 +396,39 @@ export class UI {
         this.els.modalBox.querySelectorAll('button[data-q]').forEach(b => b.classList.toggle('q-on', b === btn));
       };
     });
+    // 导出存档：下载 JSON 文件
+    $('set-export').onclick = () => {
+      if (onExport) {
+        const json = onExport();
+        if (json) {
+          const blob = new Blob([json], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `homm3d_save_${new Date().toISOString().slice(0, 10)}.json`;
+          a.click();
+          URL.revokeObjectURL(url);
+          this.toast('存档已导出', 'good');
+        } else {
+          this.toast('暂无可导出的存档', 'warn');
+        }
+      }
+    };
+    // 导入存档：选择文件后读取 JSON
+    $('set-import').onclick = () => $('set-import-file').click();
+    $('set-import-file').onchange = (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (onImport) {
+          const ok = onImport(reader.result);
+          this.toast(ok ? '存档已导入，刷新生效' : '导入失败：文件格式错误', ok ? 'good' : 'warn');
+          if (ok) setTimeout(() => this.closeModal(), 800);
+        }
+      };
+      reader.readAsText(file);
+    };
     $('btn-close-modal').onclick = () => this.closeModal();
   }
 

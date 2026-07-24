@@ -106,6 +106,7 @@ h1, .cg-title, .load-title { font-family: "Ma Shan Zheng", "Noto Sans SC", serif
 #mp-bar { position: relative; height: 16px; margin-top: 8px; background: #241c0e; border: 1px solid var(--gold-border); border-radius: 8px; overflow: hidden; }
 #mp-fill { height: 100%; background: linear-gradient(90deg, #3f8f4f, #6fbf5f); transition: width .3s; }
 #mp-text { position: absolute; inset: 0; text-align: center; font-size: 11px; line-height: 16px; color: #e8f8e0; text-shadow: 0 1px 2px #000; }
+#btn-undo { margin-top: 8px; width: 100%; padding: 5px 10px; font-size: 13px; }
 
 /* ---------- 底部提示（地图模式） ---------- */
 #hint {

@@ -55,6 +55,8 @@ export class Battle {
     this.obstacles = new Set();
     this.time = 0;
     this.kills = 0;           // 本场击杀的敌方单位数（结算统计用）
+    this.timeScale = 1;       // 时间缩放（结算慢镜头用）
+    this.cinematic = false;   // 结算动画进行中（锁定输入、隐藏标记）
 
     this.buildField();
     this.deploy();
@@ -344,11 +346,75 @@ export class Battle {
     this.clearHighlight();
     this.marker.visible = false;
     const win = e === 0;
-    Tweens.delay(0.9, () => {
+    // 略作停顿让最后一击动画播完，再进入慢镜头结算（不直接 onEnd）
+    Tweens.delay(0.4, () => this.playEndCinematic(win));
+    return true;
+  }
+
+  // ---------- 战斗结算动画（慢镜头 + 粒子 + 音效） ----------
+  // 胜利：金色粒子上飘 + 凯旋音效；失败：红色粒子下沉 + 低沉音效
+  playEndCinematic(win) {
+    this.cinematic = true;             // 锁定输入（over 已为 true，此处冗余保护）
+    this.timeScale = 0.3;              // 慢镜头
+    sfx(win ? 'win' : 'lose');         // 凯旋 / 低沉音效
+    this.spawnEndParticles(win);       // 金色上飘 / 红色下沉
+    // 1.5 秒慢镜头后恢复常速并回调结算，总时长约 1.9 秒
+    Tweens.delay(1.5, () => {
+      this.timeScale = 1;
+      this.cinematic = false;
       const surviving = this.aliveStacks(0).map(s => ({ type: s.type, count: s.count }));
       this.onEnd(win, surviving, this.kills);
     });
-    return true;
+  }
+
+  // 结算粒子：50 个粒子从战场中心散开，胜利向上飘、失败向下沉，整体渐隐
+  // 使用独立 THREE.Points + Tweens 驱动，不受 timeScale 影响
+  spawnEndParticles(win) {
+    const N = 50;
+    const pos = new Float32Array(N * 3);
+    const vel = [];
+    for (let i = 0; i < N; i++) {
+      pos[i * 3]     = rand(-0.8, 0.8);          // 战场中心附近随机起点
+      pos[i * 3 + 1] = 0.5 + rand(-0.2, 0.2);
+      pos[i * 3 + 2] = rand(-0.8, 0.8);
+      const a = Math.random() * Math.PI * 2;
+      const r = rand(0.4, 1.2);
+      vel.push({
+        x: Math.cos(a) * r,
+        y: win ? rand(2.0, 3.5) : rand(-2.6, -1.2),  // 胜利上飘 / 失败下沉
+        z: Math.sin(a) * r,
+      });
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const mat = new THREE.PointsMaterial({
+      color: win ? 0xffd76b : 0xff4444,
+      size: 0.28, transparent: true, opacity: 1,
+      depthWrite: false, blending: THREE.AdditiveBlending,
+    });
+    const points = new THREE.Points(geo, mat);
+    points.frustumCulled = false;
+    this.root.add(points);
+    const D = 1.5;                     // 粒子动画时长（真实秒）
+    let prevK = 0;
+    Tweens.add({
+      dur: D, ease: easeLinear,
+      onUpdate: k => {
+        const dt = (k - prevK) * D;    // 由进度差换算真实时间步长
+        prevK = k;
+        for (let i = 0; i < N; i++) {
+          pos[i * 3]     += vel[i].x * dt;
+          pos[i * 3 + 1] += vel[i].y * dt;
+          pos[i * 3 + 2] += vel[i].z * dt;
+        }
+        geo.attributes.position.needsUpdate = true;
+        mat.opacity = 1 - k;           // 渐隐
+      },
+      onDone: () => {
+        this.root.remove(points);
+        geo.dispose(); mat.dispose();
+      },
+    });
   }
 
   // ---------- 范围计算 ----------
@@ -977,6 +1043,7 @@ export class Battle {
 
   // ---------- 帧更新 ----------
   update(dt, camera) {
+    dt *= this.timeScale;  // 结算慢镜头缩放（影响场景动画，不影响 Tweens 计时）
     this.time += dt;
     // 震屏衰减
     if (this.shakeAmt > 0.005) {
@@ -998,8 +1065,8 @@ export class Battle {
         f.scale.set(s, s * (1 + Math.sin(this.time * 13 + i) * 0.12), s);
       }
     }
-    // 主动单位标记
-    if (this.active && this.active.alive) {
+    // 主动单位标记（结算动画期间隐藏）
+    if (this.active && this.active.alive && !this.cinematic) {
       const st = this.active;
       this.marker.visible = true;
       this.marker.position.set(st.mesh.position.x, 1.7 + Math.sin(this.time * 4) * 0.12, st.mesh.position.z);

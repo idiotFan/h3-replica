@@ -64,6 +64,22 @@ export class Minimap {
       const sz = o.kind === 'castle' || o.kind === 'enemyCastle' || o.data.boss ? 5 : 3;
       c.fillRect((o.x + 0.5) * s - sz / 2, (o.y + 0.5) * s - sz / 2, sz, sz);
     }
+    // 书签标记（仅已探索的显示黄色菱形）
+    if (this.world.bookmarks && this.world.bookmarks.size) {
+      c.fillStyle = '#ffd76b';
+      for (const bk of this.world.bookmarks) {
+        const [bx, by] = bk.split(',').map(Number);
+        if (exp && !(exp[bx] && exp[bx][by])) continue; // 未探索不显示
+        const cx = (bx + 0.5) * s, cy = (by + 0.5) * s;
+        c.beginPath();
+        c.moveTo(cx, cy - 3);
+        c.lineTo(cx + 3, cy);
+        c.lineTo(cx, cy + 3);
+        c.lineTo(cx - 3, cy);
+        c.closePath();
+        c.fill();
+      }
+    }
     // 英雄（闪烁圆点）
     const h = this.world.hero;
     c.fillStyle = Math.floor(performance.now() / 400) % 2 ? '#ffffff' : '#3b82f6';

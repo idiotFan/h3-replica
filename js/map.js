@@ -48,6 +48,10 @@ export class WorldMap {
     this.explored = null; // 战争迷雾：已探索标记 2D
     this.visible = null;  // 当前可见标记 2D
     this.fogMesh = null;  // 迷雾遮罩平面（CanvasTexture）
+    this.bookmarks = new Set();      // 地图书签 "x,y" 集合
+    this.bookmarkMeshes = new Map(); // 书签 3D 标记 "x,y" -> Mesh
+    this._bookmarkGeo = null;        // 书签标记共享几何体（所有书签共用）
+    this._bookmarkMat = null;        // 书签标记共享材质（所有书签共用）
   }
   // 视野半径（受移动力影响，骑靴/后勤学也间接提升探索）
   get sightRadius() { return Math.max(4, Math.round(DIFF.moveMax / 3) + 2); }
@@ -110,6 +114,17 @@ export class WorldMap {
     this.buildHero();
     this.buildHover();
     this.buildFog();
+    // 恢复存档中的书签标记
+    if (this._pendingBookmarks) {
+      for (const bk of this._pendingBookmarks) {
+        const [bx, by] = bk.split(',').map(Number);
+        if (this.inBounds(bx, by)) {
+          this.bookmarks.add(bk);
+          this.addBookmarkMesh(bx, by);
+        }
+      }
+      this._pendingBookmarks = null;
+    }
     this.built = true;
   }
 
@@ -196,6 +211,7 @@ export class WorldMap {
     this.bossPos = saved.bossPos;
     this.pathTiles = new Set(saved.paths || []);
     this._pendingExplored = saved.explored || null; // buildFog 会读取
+    this._pendingBookmarks = saved.bookmarks || null; // build() 中恢复
   }
   serialize() {
     const ch = { water: 'w', grass: 'g', forest: 'f', mountain: 'm' };
@@ -212,6 +228,7 @@ export class WorldMap {
       hero: { x: this.hero.x, y: this.hero.y, movePoints: this.hero.movePoints, moveMax: this.hero.moveMax },
       startPos: this.startPos, castlePos: this.castlePos, bossPos: this.bossPos,
       explored: this.explored ? this.explored.map(col => col.map(v => v ? 1 : 0).join('')) : null,
+      bookmarks: [...this.bookmarks],
     };
   }
 
@@ -715,6 +732,64 @@ export class WorldMap {
     return eh;
   }
 
+  // 后台资产加载完成后，把仍用原语回退的对象模型替换为 glb（仅替换有 glb 缓存的）
+  refreshObjectMeshes() {
+    if (!this.built) return;
+    for (const obj of this.objects.values()) {
+      const old = obj.mesh;
+      if (!old || old.userData.fromGltf) continue; // 已是 glb 或无 mesh
+      let neu = null;
+      try {
+        if (obj.kind === 'castle') neu = createCastle('player');
+        else if (obj.kind === 'enemyCastle') neu = createCastle('enemy');
+        else if (obj.kind === 'mine') neu = createMine(obj.data.mine);
+        else if (obj.kind === 'monster') {
+          neu = createUnit(obj.data.stacks[0].type, 1);
+          neu.scale.multiplyScalar(obj.data.boss ? 1.5 : 1.15);
+        }
+      } catch (e) { continue; }
+      if (!neu || !neu.userData.fromGltf) continue; // 仍是原语，跳过
+      // 保留变换
+      neu.position.copy(old.position);
+      neu.userData.tile = old.userData.tile;
+      // 替换场景节点
+      this.scene.remove(old);
+      disposeObject3D(old);
+      this.scene.add(neu);
+      obj.mesh = neu;
+      // 登记夜间发光材质
+      neu.traverse(o => { if (o.userData.lamp && o.material) this.lampMats.push(o.material); });
+    }
+    // 敌方英雄
+    for (const eh of this.enemyHeroes) {
+      const old = eh.mesh;
+      if (!old || old.userData.fromGltf) continue;
+      const neu = createHero('enemy');
+      if (!neu || !neu.userData.fromGltf) continue;
+      neu.position.copy(old.position);
+      neu.userData.tile = old.userData.tile;
+      this.scene.remove(old);
+      disposeObject3D(old);
+      this.scene.add(neu);
+      eh.mesh = neu;
+    }
+    // 玩家英雄
+    if (this.heroMesh && !this.heroMesh.userData.fromGltf) {
+      const old = this.heroMesh;
+      const neu = createHero('player');
+      if (neu && neu.userData.fromGltf) {
+        neu.position.copy(old.position);
+        // 名字标签转移到新 mesh
+        const tag = old.children.find(c => c.isSprite);
+        if (tag) { old.remove(tag); neu.add(tag); }
+        this.scene.remove(old);
+        disposeObject3D(old);
+        this.scene.add(neu);
+        this.heroMesh = neu;
+      }
+    }
+  }
+
   // 重建对象头顶标签（兵力变化后调用）
   refreshLabel(obj) {
     if (!obj.label) return;
@@ -833,6 +908,11 @@ export class WorldMap {
     this.fogMesh = null;
     this.explored = null; this.visible = null;
     this._pendingExplored = null;
+    this._pendingBookmarks = null;
+    this.bookmarks.clear();
+    this.bookmarkMeshes.clear();
+    this._bookmarkGeo = null;
+    this._bookmarkMat = null;
     disposeObject3D(this.scene);
     this.scene.clear();
     this.objects.clear();
@@ -846,6 +926,7 @@ export class WorldMap {
     this.battlePending = null;
     this.moving = false;
     this.pending = null;
+    this._undoState = null;
   }
 
   // ---------- 英雄 ----------
@@ -880,6 +961,52 @@ export class WorldMap {
     }
   }
   hidePath() { if (this.pathDots) for (const d of this.pathDots) d.visible = false; }
+
+  // ---------- 地图书签 ----------
+  // 确保书签标记的共享几何体/材质已创建（懒加载，所有书签共用一份以节省显存）
+  _ensureBookmarkAssets() {
+    if (!this._bookmarkGeo) {
+      this._bookmarkGeo = new THREE.TorusGeometry(0.45, 0.07, 8, 20);
+      this._bookmarkMat = new THREE.MeshBasicMaterial({
+        color: 0xffd76b, transparent: true, opacity: 0.95,
+        depthTest: false, depthWrite: false, // 始终可见，方便回头寻找
+      });
+    }
+  }
+  // 在地块上方添加书签标记（发光圆环，y=2.0）
+  addBookmarkMesh(x, y) {
+    this._ensureBookmarkAssets();
+    const k = key(x, y);
+    if (this.bookmarkMeshes.has(k)) return;
+    const w = this.tileWorld(x, y);
+    const ring = new THREE.Mesh(this._bookmarkGeo, this._bookmarkMat);
+    ring.position.set(w.x, w.y + 2.0, w.z);
+    ring.renderOrder = 1000; // 绘制在迷雾之上
+    this.scene.add(ring);
+    this.bookmarkMeshes.set(k, ring);
+  }
+  // 移除书签标记
+  removeBookmarkMesh(x, y) {
+    const k = key(x, y);
+    const ring = this.bookmarkMeshes.get(k);
+    if (ring) { this.scene.remove(ring); this.bookmarkMeshes.delete(k); }
+  }
+  // 切换书签状态：有则移除，无则添加
+  toggleBookmark(x, y) {
+    if (!this.inBounds(x, y)) return;
+    const k = key(x, y);
+    if (this.bookmarks.has(k)) {
+      this.bookmarks.delete(k);
+      this.removeBookmarkMesh(x, y);
+      sfx('select');
+      this.events.toast('已取消标记', '');
+    } else {
+      this.bookmarks.add(k);
+      this.addBookmarkMesh(x, y);
+      sfx('select');
+      this.events.toast('已标记地点', 'good');
+    }
+  }
 
   // ---------- 战争迷雾 ----------
   // 单张 CanvasTexture 覆盖全图，双线性过滤 + 径向渐变实现平滑视野边缘
@@ -1117,6 +1244,8 @@ export class WorldMap {
       steps.push(st);
     }
     if (!steps.length) { this.events.toast('移动力不足，请结束回合', 'warn'); this.pending = null; return; }
+    // 移动开始前记录撤销状态（位置 + 移动力），供 undoMove 恢复
+    this._undoState = { x: this.hero.x, y: this.hero.y, movePoints: this.hero.movePoints };
     this.moving = true;
     this.hidePath();
     this.hoverRing.visible = false;
@@ -1195,6 +1324,21 @@ export class WorldMap {
       return;
     }
     this.events.onArrive();
+  }
+
+  // 撤销上一次移动：回到移动前位置并恢复移动力（仅一次）
+  undoMove() {
+    if (!this._undoState || this.moving) return false;
+    this.hero.x = this._undoState.x;
+    this.hero.y = this._undoState.y;
+    this.hero.movePoints = this._undoState.movePoints;
+    // 把英雄网格移回原位
+    const w = this.tileWorld(this.hero.x, this.hero.y);
+    this.heroMesh.position.set(w.x, w.y, w.z);
+    this._undoState = null; // 只能撤销一次
+    this.updateFog();
+    this.hidePath();
+    return true;
   }
 
   // ---------- 悬停 ----------
@@ -1283,6 +1427,10 @@ export class WorldMap {
         const f = o.mesh.userData.flag;
         if (f) f.rotation.y = Math.sin(this.time * 3 + o.x) * 0.3;
       }
+    }
+    // 书签标记旋转动画（圆环绕法线自转，吸引视线）
+    for (const ring of this.bookmarkMeshes.values()) {
+      ring.rotation.z += dt * 1.5;
     }
     if (!this.moving) {
       this.heroMesh.position.y = this.tileH[this.hero.x][this.hero.y] + Math.sin(this.time * 2.5) * 0.03;

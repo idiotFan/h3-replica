@@ -1,0 +1,19 @@
+{
+  "name": "英雄无敌 3D",
+  "short_name": "英雄无敌3D",
+  "description": "Three.js 复刻《英雄无敌3》：大地图探索 + 六边形回合制战场",
+  "start_url": "./",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "any",
+  "background_color": "#0a0e1a",
+  "theme_color": "#c8a951",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Cpath d='M256 32 L448 112 V256 C448 384 352 464 256 496 C160 464 64 384 64 256 V112 Z' fill='%23c8a951'/%3E%3Cpath d='M256 80 L400 144 V256 C400 348 320 416 256 448 C192 416 112 348 112 256 V144 Z' fill='%23241c0e'/%3E%3Cpath d='M256 128 L304 208 L256 384 L208 208 Z' fill='%23ffd76b'/%3E%3C/svg%3E",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

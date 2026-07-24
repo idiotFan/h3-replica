@@ -8,7 +8,7 @@ import { WorldMap } from './map.js';
 import { Battle } from './battle.js';
 import { UI } from './ui.js';
 import { Minimap } from './minimap.js';
-import { preloadAllAssets } from './assets/loader.js';
+import { preloadAllAssets, preloadGroup, getBootAssets, getBackgroundAssets } from './assets/loader.js';
 
 // ---------- 冒烟测试参数（?smoke=map|battle） ----------
 const SMOKE = new URLSearchParams(location.search).get('smoke');
@@ -86,6 +86,7 @@ const ui = new UI({
   onRetreat: () => battle && ui.confirmRetreat(() => battle.retreat()),
   onSettings: () => openSettings(),
   onSelectSpell: key => battle && battle.selectSpell(key),
+  onUndo: () => undoMove(),
   getCamera: () => camera,
 });
 
@@ -126,7 +127,7 @@ const world = new WorldMap(mapScene, {
   onEncounter(obj) {
     startBattle(obj);
   },
-  onArrive() { refreshUI(); },
+  onArrive() { refreshUI(); if (world._undoState) ui.setUndoAvailable(true); },
 });
 // 英雄移动力镜像到 state.hero 方便 UI
 Object.defineProperty(state.hero, 'movePoints', { get: () => world.hero.movePoints });
@@ -269,6 +270,9 @@ function endTurn() {
   state.day++;
   world.day = state.day;
   world.hero.movePoints = world.hero.moveMax;
+  // 结束回合后清除撤销状态
+  world._undoState = null;
+  ui.setUndoAvailable(false);
   // 收入
   let gold = DIFF.castleIncome + state.mines.gold * MINES.gold.income.gold + (state.hero.skills.estates || 0) * 250;
   let wood = state.mines.sawmill * MINES.sawmill.income.wood;
@@ -301,17 +305,41 @@ function endTurn() {
   } else saveGame();
 }
 
+// 撤销上一次移动
+function undoMove() {
+  if (state.mode !== 'map' || world.moving) return;
+  const ok = world.undoMove();
+  if (ok) {
+    sfx('click');
+    refreshUI();
+    ui.toast('已撤销移动', 'good');
+    ui.setUndoAvailable(false);
+  }
+}
+
 // ---------- 设置（静音 / 画质） ----------
 function applyQuality() {
-  const low = state.quality === 'low';
+  const q = state.quality;
+  const low = q === 'low';
   renderer.setPixelRatio(low ? 1 : Math.min(window.devicePixelRatio, IS_MOBILE ? 1.5 : 2));
   renderer.shadowMap.enabled = !low;
-  // 材质需要重新编译以应用/移除阴影
+  // 阴影贴图按画质分级：low 关闭 / medium 1024 / high 2048
+  const shadowSize = low ? 0 : (q === 'medium' ? 1024 : 2048);
   for (const sc of [mapScene, battleScene]) {
     if (!sc) continue;
     sc.traverse(o => {
       if (o.material) for (const m of Array.isArray(o.material) ? o.material : [o.material]) m.needsUpdate = true;
-      if (o.isDirectionalLight) o.castShadow = !low;
+      if (o.isDirectionalLight) {
+        o.castShadow = !low;
+        if (!low && o.shadow && o.shadow.mapSize) {
+          const need = o.shadow.mapSize.width !== shadowSize;
+          if (need) {
+            o.shadow.mapSize.set(shadowSize, shadowSize);
+            o.shadow.map?.dispose();
+            o.shadow.map = null;
+          }
+        }
+      }
     });
   }
 }
@@ -329,6 +357,24 @@ function openSettings() {
       state.quality = q;
       localStorage.setItem('homm_quality', q);
       applyQuality();
+    },
+    onExport: () => {
+      // 导出当前存档为 JSON 字符串
+      const s = localStorage.getItem(SAVE_KEY);
+      return s || null;
+    },
+    onImport: (text) => {
+      // 导入存档：校验格式后写入 localStorage，刷新生效
+      try {
+        const data = JSON.parse(text);
+        if (!data || typeof data !== 'object' || !data.state || !data.world) {
+          return false;
+        }
+        localStorage.setItem(SAVE_KEY, text);
+        return true;
+      } catch (e) {
+        return false;
+      }
     },
   });
 }
@@ -353,6 +399,9 @@ function maybeSpawnEnemy() {
 function startBattle(encounterObj) {
   state.mode = 'battle';
   world.pending = null;
+  // 进入战斗后清除撤销状态（战斗会改变世界状态，不允许撤销）
+  world._undoState = null;
+  ui.setUndoAvailable(false);
   battleScene = new THREE.Scene();
   const enemyArmy = encounterObj.data.stacks.map(s => ({ ...s }));
   // 敌方英雄/城堡给予敌军属性加成
@@ -448,7 +497,7 @@ function onBattleEnd(result, surviving, encounterObj, kills) {
       h.skillPoints++;
       levelText = ` · 升到 Lv.${h.level}，获得技能点！`;
     }
-    sfx('win');
+    // 胜利音效已在战斗结算动画（Battle.playEndCinematic）中播放，此处不再重复
     world.removeObject(encounterObj);
     // 警戒圈拦截战获胜后，拾取英雄脚下被守护的资源/宝物/矿场
     world.collectAt(world.hero.x, world.hero.y);
@@ -486,7 +535,7 @@ function onBattleEnd(result, surviving, encounterObj, kills) {
     offerSkillChoices();
   } else {
     state.over = true;
-    sfx('lose');
+    // 失败音效已在战斗结算动画（Battle.playEndCinematic）中播放，此处不再重复
     saveRecord('lose');
     state.mode = 'map';
     ui.setMode('map');
@@ -525,6 +574,8 @@ const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 let downPos = null;
 let lastMoveTs = 0;
+let longPressTimer = null;   // 长按书签定时器
+let longPressFired = false;  // 长按是否已触发（避免 pointerup 再执行点击移动）
 
 function setPointer(e) {
   pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
@@ -538,8 +589,41 @@ renderer.domElement.addEventListener('pointerdown', e => {
   if (document.activeElement !== renderer.domElement) {
     renderer.domElement.focus({ preventScroll: true });
   }
+  // 长按地块标记/取消书签（仅大地图左键）
+  if (e.button === 0 && state.mode === 'map' && world && world.built) {
+    longPressFired = false;
+    setPointer(e);
+    raycaster.setFromCamera(pointer, camera);
+    let tile = null;
+    const objMeshes = [...world.objects.values()].map(o => o.mesh);
+    let hits = raycaster.intersectObjects(objMeshes, true);
+    if (hits.length) {
+      let g = hits[0].object;
+      while (g && !g.userData.tile) g = g.parent;
+      if (g) tile = g.userData.tile;
+    }
+    if (!tile) {
+      hits = raycaster.intersectObject(world.terrain);
+      if (hits.length) tile = world.worldToTile(hits[0].point.x, hits[0].point.z);
+    }
+    if (tile) {
+      const bt = tile;
+      longPressTimer = setTimeout(() => {
+        longPressTimer = null;
+        if (world && world.built && !world.moving && !world.enemyTurn && !state.over) {
+          longPressFired = true;
+          world.toggleBookmark(bt.x, bt.y);
+        }
+      }, 500);
+    }
+  }
 });
 renderer.domElement.addEventListener('pointerup', e => {
+  // 取消长按定时器；若长按已触发书签则跳过点击移动
+  if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+  const wasLongPress = longPressFired;
+  longPressFired = false;
+  if (wasLongPress) return;
   if (!downPos || downPos.b !== 0) return;
   const moved = Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y);
   downPos = null;
@@ -583,6 +667,13 @@ renderer.domElement.addEventListener('pointerup', e => {
 });
 
 renderer.domElement.addEventListener('pointermove', e => {
+  // 长按过程中移动超过 5px 则取消书签触发
+  if (longPressTimer && downPos) {
+    if (Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y) > 5) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+    }
+  }
   setPointer(e);
   const now = performance.now();
   if (now - lastMoveTs < 55) return; // 节流 ~18Hz，减少移动端开销
@@ -760,7 +851,10 @@ async function boot() {
   const tip = document.querySelector('#loading .load-tip');
   const fill = document.querySelector('#loading .load-fill');
   try {
-    const res = await preloadAllAssets((ratio, label) => {
+    // 分阶段加载：先加载启动必需的核心资产（玩家英雄+城堡+初始兵种+矿场），
+    // 进入游戏后后台加载剩余资产（野怪+敌方+精锐兵种），大幅缩短首屏等待。
+    const bootAssets = getBootAssets();
+    const res = await preloadGroup(bootAssets, (ratio, label) => {
       if (tip) tip.textContent = label || '加载资源…';
       if (fill) {
         fill.style.animation = 'none';
@@ -773,6 +867,12 @@ async function boot() {
     console.warn('[boot] 资源预加载异常，使用原语回退', e);
     if (tip) tip.textContent = '使用程序化模型';
   }
+  // 后台预加载剩余资产（不阻塞启动；加载完成后刷新地图上仍用原语的对象模型为 glb）
+  preloadGroup(getBackgroundAssets()).then(() => {
+    if (world && world.built) {
+      try { world.refreshObjectMeshes(); } catch (e) { console.warn('[boot] 刷新对象模型异常', e); }
+    }
+  }).catch(e => console.warn('[boot] 后台资产加载异常', e));
 
   const bootSave = SMOKE ? null : readSave();
   if (bootSave) {
