@@ -6,6 +6,32 @@
 
 ---
 
+## ⚠️ 阅读须知（2026-07-25 补注）
+
+**本文 §1 – §12 是 v1 规范，针对的是「Blender 手工建模 → 导出 glb」的管线。**
+2026-07-24~25 起，项目的 **17 个角色资产**（15 兵种 + 2 英雄）已经改由
+**Meshy AI 生成 → `scripts/compress_assets.mjs` 压缩** 的新管线产出，
+只剩 **5 个建筑**（`castle_player` / `castle_enemy` / `mine_sawmill` / `mine_ore` / `mine_gold`）
+还走 v1 的 Blender 管线。
+
+因此下面这些章节对 Meshy 资产**不再适用或需要改读**：
+
+| 章节 | v1 说法 | Meshy + 压缩管线的实际情况 |
+|------|---------|---------------------------|
+| §2.1 Blender 导出朝向检查清单 | 手工在 Blender 里校朝向 | Meshy 靠 prompt 里的 `side profile view facing left` 约束；有偏差时在 `js/assets/manifest.js` 给该 key 加 `rotY` |
+| §3 面数预算 | 表格里的区间 | **单一事实来源已改成 `js/assets/manifest.js` 的 `polyBudget`**，压缩管线直接读它做 meshopt 简化。改面数预算 = 改 `polyBudget` |
+| §4.1 贴图尺寸 | 手工出图时的目标 | 由压缩管线参数强制：普通单位 **512**、英雄/龙 **1024**、metallicRoughness **256**；格式 **webp**（`EXT_texture_webp`） |
+| §4.2 Emissive | 「仅眼睛、魔法、夜间窗户；强度克制」 | 对 Meshy 资产**一律关闭**——Meshy 导出 `emissiveFactor=[1,1,1]` + `emissiveTexture`，会顶穿 `main.js` 的 Bloom `threshold 0.85` 把整个模型糊成一团光。压缩管线删贴图 + 归零，`manifest.js` 的 `SINGLE_MESH_EMISSIVE=0` 运行时再兜一层 |
+| §4.3 / §7.1 队伍色 `TeamColor` 命名 | 靠网格名分部位染色 | **对 Meshy 资产必然失效**：它们的 node/mesh/material 名全是 `null`。改走 `manifest.js` 的 `singleMesh:true` → `factory.js` 整体色调偏移（`SINGLE_MESH_TINT=0.25`）+ 强化底座阵营光环。`factory.js` 的 `detectSingleMesh()` 会按「网格全无名」在运行时自愈，标记漏改也不会退化成没有队伍色 |
+| §6 动画规范 | `idle/walk/attack/hit/death` 五段 + 骨骼根 `Root` | **Meshy 资产 `animations` 为空数组，没有 armature**。当前全部用代码模拟（颠簸/晃动/呼吸），见 `HANDOVER.md` §六。这一节仍是**将来接真骨骼动画时的目标规范**，不是现状描述 |
+| §7 目录 `art/src/` | Blender 源文件 `.blend` | 实际目录是 **`art/_src/`**，存的是 Meshy 原件 glb（154MB，`.gitignore` + `deploy.sh` 双重排除，**是唯一副本**） |
+| §9.3 包体目标 | P0 <3MB / P1 <12MB / P2 <25MB | 已达成且大幅优于目标，实测见下方 §13 |
+| §10 Blender 检查表 | 每资源导出前逐项检查 | 只对 5 个建筑适用；角色资产的对应检查见 §13 |
+
+**新增资产时先看 §13，再回来看 §1 – §12 的风格/调色/验收部分（那些仍然完全适用）。**
+
+---
+
 ## 1. 风格定位
 
 | 项 | 规范 |
@@ -235,11 +261,15 @@ art/
 - 阴影：`castShadow/receiveShadow` 按画质开关
 
 ### 9.3 包体目标
-| 阶段 | 全部 glb 合计 |
-|------|----------------|
-| P0 | < 3 MB |
-| P1 | < 12 MB |
-| P2 | < 25 MB |
+
+| 阶段 | 全部 glb 合计 | 实际达成（2026-07-25 实测） |
+|------|----------------|------|
+| P0 | < 3 MB | — |
+| P1 | < 12 MB | — |
+| P2 | < 25 MB | **3.69 MB**（22 个 glb，3,864,140 字节）——远优于目标 |
+
+**更该盯的是「首屏阻塞下载量」而不是总量**：分阶段懒加载后，首屏只下 9 个 glb =
+**1.27 MB**（1,327,244 字节），其余 13 个 = 2.42 MB 在进入游戏后后台补。详见 §13。
 
 ---
 
@@ -279,4 +309,83 @@ art/
 
 ---
 
-*规范版本：v1 · 与当前 `config.js` 单位 key、队伍色、战场尺度对齐。后续改 key 或尺度必须同步改本文档。*
+---
+
+## 13. Meshy + 压缩管线（v2 实际指标）★ 2026-07-25
+
+> 这一节描述的是**现状**：17 个角色资产实际是怎么产出的、实测数字是多少。
+> §1 – §12 的风格定位（§1）、世界单位与对齐（§2）、调色板（§5）、验收标准（§12）仍然完全适用。
+
+### 13.1 管线
+
+```
+Meshy AI 文生 3D                 压缩管线                       运行时
+──────────────────               ────────                       ──────
+scripts/meshy_gen.mjs      →     art/_src/**.glb         →     art/export/**.glb
+（preview + refine，PBR）        （唯一副本，154MB，        （3.69MB，上线）
+                                   不入 git、不上线）
+                                 scripts/compress_assets.mjs
+                                 npm run compress:assets -- --format webp
+```
+
+**为什么必须压**：Meshy 原件单个 7–10MB，约 95% 是 4 张 2048² 贴图；22 个合计 **136MB**，
+首屏那 9 个就有 40MB+，在国内移动网络下等同于打不开。
+
+### 13.2 硬指标（压缩管线强制，改这些 = 改 `scripts/compress_assets.mjs` 的 `DEFAULTS`）
+
+| 项 | 值 | 备注 |
+|----|----|------|
+| 面数 | 读 `js/assets/manifest.js` 的 `polyBudget` | **单一事实来源**。实际区间 1500（枪兵/弓箭手/骷髅）～ 6000（黑龙），与 §3 的预算表一致 |
+| baseColor / normal 尺寸 | 普通单位 **512**，英雄 + 龙 **1024** | `--texture-size` / `--hero-texture-size`，`--big-texture-assets=hero_player,hero_enemy,dragon` |
+| metallicRoughness | **256**，且通道标准差低于 0.05 时退化成标量 | MR 多是低频遮罩，但少数资产真有细节，不一刀切 |
+| 贴图格式 | **webp**（`EXT_texture_webp`） | three r160 **原生**支持。**禁用** Draco / meshopt 压缩 / KTX2 — `js/assets/loader.js` 没注册对应解码器，用了直接加载失败 |
+| 编码质量 | baseColor 80 / normal 85 / MR 90 | 法线图对压缩噪声敏感，MR 是数据不是颜色 |
+| emissive | **一律删除并归零** | 见阅读须知里的 §4.2 一行 |
+
+> ⚠ 线上这批资产就是用上面这组默认值 + `--format webp` 出的。**改了参数就不能复现线上资产**，
+> 而体积目标（≤8MB）已有 2.2 倍余量，没有正当理由动它。
+
+### 13.3 实测体积（2026-07-25，`art/export`，22 个 glb 合计 3,864,140 字节 = 3.69MB）
+
+**首屏阻塞加载（`loader.js getBootAssets()`，9 个 / 1,327,244 字节 / 1.27MB）**
+
+| 资产 | 字节 | 资产 | 字节 |
+|------|------|------|------|
+| hero_player | 381,232 | pikeman | 128,544 |
+| griffin | 177,676 | archer | 99,008 |
+| castle_player | 164,532 | mine_sawmill | 94,292 |
+| swordsman | 158,900 | mine_gold | 63,360 |
+| | | mine_ore | 59,700 |
+
+**后台加载（`getBackgroundAssets()`，13 个 / 2,536,896 字节 / 2.42MB）**：
+hero_enemy 343,632 · dragon 295,648 · champion2 279,844 · champion 205,888 · castle_enemy 202,252 ·
+griffin2 196,196 · swordsman2 188,888 · pikeman2 168,356 · archer2 124,500 · skeleton 156,000 ·
+orc 154,224 · ghost 130,876 · wolf 90,592
+
+> 两组相加 **正好等于目录总量**，说明 22 个 glb 全部被代码引用、**没有孤儿资产**。
+> 新增 glb 后请重跑这个核对，多出来的差额就是没人引用的死资产。
+
+**单资产上限建议**：普通单位 ≤ 200KB，精锐 ≤ 300KB，英雄/Boss ≤ 400KB，建筑 ≤ 220KB。
+当前全部资产都在线内，最大的是 `hero_player.glb` 381KB。
+
+**若将来还要再砍首屏**：唯一值得动的单点是 `hero_player.glb`——它占首屏 1.27MB 的 **29%**，
+其中贴图占它自身的 **65%**。把它的 baseColor/normal 从 1024 降到 512 约省 200KB。
+（2026-07-25 判定不必要，未执行。）
+
+### 13.4 新增 Meshy 角色资产检查表
+
+- [ ] prompt 含 `stylized, low-poly, game asset, fantasy` + `side profile view facing left`（项目前方 = -Y）
+- [ ] prompt **不含** `realistic, photorealistic`（与既有 lowpoly 风格冲突）
+- [ ] 原件下载到 `art/_src/units/` 或 `art/_src/heroes/`（Meshy 服务端只保留 3 天）
+- [ ] `js/assets/manifest.js` 里该 key 有 `polyBudget`（压缩管线的面数目标）与 `singleMesh: true`
+- [ ] 跑 `npm run compress:assets -- --format webp --only <key>`，确认输出 ≤ 上一节的单资产上限
+- [ ] 起本地 http server 目视：朝向对不对（不对就加 `rotY`）、脚底有没有悬浮/沉地、
+      开 Bloom 时有没有整体泛光（有就说明 emissive 没删干净）
+- [ ] 敌我两侧都看一眼：整体色调偏移 + 底座光环能不能在俯视小尺寸下 0.5 秒内区分（§12 第 2 条）
+- [ ] 首屏资产变动的话，重算 `getBootAssets()` 那组的总字节数并更新 §13.3
+
+---
+
+*规范版本：v1（§1–§12，Blender 手工管线）+ v2 补注（§13 与文首阅读须知，Meshy + 压缩管线，2026-07-25）
+· 与当前 `config.js` 单位 key、`js/assets/manifest.js` 的 `polyBudget` / `singleMesh`、队伍色、战场尺度对齐。
+后续改 key、面数预算或尺度必须同步改本文档。*
