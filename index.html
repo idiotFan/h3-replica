@@ -108,11 +108,87 @@
 
 <script type="module" src="js/main.js"></script>
 <script>
-  // 注册 Service Worker（PWA 离线支持），生产环境生效，localhost 跳过避免开发干扰
-  if ('serviceWorker' in navigator && location.protocol === 'https:') {
-    window.addEventListener('load', () => {
-      navigator.serviceWorker.register('./sw.js').catch(e => console.warn('[sw] 注册失败', e));
+  // ============ Service Worker 注册与版本轮换（PWA 离线支持）============
+  // 生产（https）默认启用；localhost 平时跳过避免旧缓存干扰开发，
+  // 需要本地验证 SW 生命周期时用 ?sw=1 显式打开（SW 在 localhost 无需 HTTPS 也能跑）。
+  const SW_LOCALHOST = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+  const SW_ENABLED = ('serviceWorker' in navigator) && (
+    location.protocol === 'https:' ||
+    (SW_LOCALHOST && new URLSearchParams(location.search).get('sw') === '1')
+  );
+
+  if (SW_ENABLED) {
+    // 本次页面加载时是否已被某个 SW 控制：
+    // false = 首次安装（不需要刷新，页面本来就是最新的）；true = 版本更新（新 SW 接管后需要刷新）
+    const hadController = !!navigator.serviceWorker.controller;
+    const RELOAD_KEY = 'h3-sw-reload-at';
+    const RELOAD_GUARD_MS = 10000;   // 10 秒内只允许因 SW 更新自动刷新一次
+    const CHECK_MIN_GAP_MS = 60000;  // 两次 update() 至少间隔 60 秒
+    let reloading = false;
+
+    // 新 SW 进入 installed（等待中）就催它立刻接管
+    const promote = (sw) => {
+      if (!sw) return;
+      const kick = () => {
+        if (sw.state === 'installed' && navigator.serviceWorker.controller) {
+          sw.postMessage({ type: 'SKIP_WAITING' });
+        }
+      };
+      kick();
+      sw.addEventListener('statechange', kick);
+    };
+
+    // 新 SW 接管 → 刷新一次拿到新代码。
+    // 防死循环用「时间窗节流」而不是一次性标志：一次性标志会让长开的标签页在
+    // 第二次发版时永远收不到更新；时间窗既挡得住 reload→controllerchange→reload
+    // 的病态循环，又不影响之后的正常轮换。
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController) return;   // 首次安装不刷新，避免打断正在进行的游戏
+      if (reloading) return;
+      try {
+        const last = Number(sessionStorage.getItem(RELOAD_KEY)) || 0;
+        if (Date.now() - last < RELOAD_GUARD_MS) return;
+        sessionStorage.setItem(RELOAD_KEY, String(Date.now()));
+      } catch (e) { /* 隐私模式下 sessionStorage 不可用，退化为只靠 reloading 页内标志 */ }
+      reloading = true;
+      location.reload();
     });
+
+    const boot = () => {
+      // updateViaCache:'none' —— 取 sw.js 时绕过 HTTP 缓存，
+      // 否则 nginx 的强缓存头会让浏览器拿旧字节比对，永远发现不了新版本。
+      navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then(reg => {
+        promote(reg.waiting);
+        promote(reg.installing);
+        reg.addEventListener('updatefound', () => promote(reg.installing));
+
+        // 【P0 关键】主动检查更新。
+        // 浏览器只在导航时做「软更新」，且对 sw.js 有 24 小时启发式节流，
+        // 光靠用户正常导航根本不会去比对新字节 —— 老用户会被旧 SW 长期钉死。
+        // 这里每次页面加载 / 切回前台 / 断网重连都强制比对一次。
+        let lastCheck = 0;
+        const checkUpdate = () => {
+          const now = Date.now();
+          if (now - lastCheck < CHECK_MIN_GAP_MS) return;   // 频繁切标签时别狂打请求
+          lastCheck = now;
+          reg.update().catch(() => {});                     // 离线时会 reject，忽略即可
+        };
+
+        checkUpdate();                                       // 注册后立刻查一次
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') checkUpdate();
+        });
+        window.addEventListener('online', checkUpdate);
+      }).catch(e => console.warn('[sw] 注册失败', e));
+    };
+
+    // 原则上等 load 事件再注册（不跟首屏抢带宽），但 load 会被 three.js CDN、
+    // 字体等第三方资源拖住 —— CDN 一慢/一挂 load 就可能永远不触发，
+    // 注册和更新检查跟着一起丢失（老用户就此拿不到新版）。所以加 3 秒兜底。
+    let booted = false;
+    const bootOnce = () => { if (!booted) { booted = true; boot(); } };
+    if (document.readyState === 'complete') bootOnce();
+    else { window.addEventListener('load', bootOnce); setTimeout(bootOnce, 3000); }
   }
 </script>
 </body>
