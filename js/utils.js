@@ -97,13 +97,35 @@ export function makeTextSprite(text, { size = 44, color = '#fff', bg = 'rgba(18,
   return sp;
 }
 
-// ---------- 资源释放（跳过共享缓存几何体） ----------
+// ---------- 资源释放（跳过共享缓存几何体 / 贴图） ----------
+/** 所有可能持有贴图的材质槽位。
+ *  这里是唯一真源：js/assets/loader.js 的 markTexturesShared 用同一份清单给
+ *  克隆材质的贴图打 userData.shared，本文件的 disposeObject3D 用同一份清单
+ *  决定该不该 dispose。两处必须一致——只覆盖 .map 的老写法有两个后果：
+ *    1) 程序化材质（models.js / textures.js）的 normalMap / roughnessMap 等
+ *       永远不会被释放，反复进出战斗会持续泄漏显存；
+ *    2) 万一将来有槽位没被 loader 标记 shared，也不会被误删（有 shared 判断兜底）。
+ */
+export const TEXTURE_SLOTS = [
+  'map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap', 'aoMap',
+  'alphaMap', 'bumpMap', 'displacementMap', 'lightMap', 'specularMap', 'envMap',
+  'clearcoatMap', 'clearcoatNormalMap', 'clearcoatRoughnessMap', 'sheenColorMap',
+  'sheenRoughnessMap', 'transmissionMap', 'thicknessMap', 'iridescenceMap',
+  'specularColorMap', 'specularIntensityMap', 'anisotropyMap',
+];
+
 export function disposeObject3D(obj) {
   obj.traverse(o => {
     if (o.geometry && !(o.geometry.userData && o.geometry.userData.shared)) o.geometry.dispose();
     if (o.material) {
       for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
-        if (m.map && !m.map.userData.shared) m.map.dispose();
+        if (!m) continue;
+        for (const slot of TEXTURE_SLOTS) {
+          const t = m[slot];
+          // 共享贴图（与 loader 缓存原件共用）必须跳过，否则一个实例销毁会让
+          // 其余实例贴图变黑并触发反复重传。
+          if (t && t.dispose && !(t.userData && t.userData.shared)) t.dispose();
+        }
         m.dispose();
       }
     }
@@ -189,44 +211,87 @@ export function sfx(kind) {
   }
 }
 
-// ---------- 背景音乐（程序化循环，轻量氛围垫底） ----------
-let bgmGain = null, bgmTimer = null, bgmPlaying = false;
-// 简易五声音阶序列，低频长音 + 偶尔高音点缀，营造探索氛围
-const BGM_SCALE = [220, 247, 277, 330, 370, 440, 494];
-export function startBgm() {
-  if (!AC || MUTED || bgmPlaying) return;
-  bgmPlaying = true;
-  bgmGain = AC.createGain();
-  bgmGain.gain.value = 0;
-  bgmGain.connect(AC.destination);
-  bgmGain.gain.setTargetAtTime(0.05, AC.currentTime, 1.5); // 淡入
-  const playNote = () => {
-    if (!bgmPlaying || !AC) return;
-    const t = AC.currentTime;
-    const f = BGM_SCALE[Math.floor(Math.random() * BGM_SCALE.length)];
-    const o = AC.createOscillator(), g = AC.createGain();
-    o.type = 'sine';
-    o.frequency.value = f;
-    g.gain.setValueAtTime(0, t);
-    g.gain.linearRampToValueAtTime(0.6, t + 0.4);
-    g.gain.linearRampToValueAtTime(0, t + 2.2);
-    o.connect(g); g.connect(bgmGain);
-    o.start(t); o.stop(t + 2.4);
-    // 低音铺垫
-    if (Math.random() < 0.5) {
-      const o2 = AC.createOscillator(), g2 = AC.createGain();
-      o2.type = 'triangle'; o2.frequency.value = f / 2;
-      g2.gain.setValueAtTime(0, t); g2.gain.linearRampToValueAtTime(0.35, t + 0.6); g2.gain.linearRampToValueAtTime(0, t + 2.6);
-      o2.connect(g2); g2.connect(bgmGain); o2.start(t); o2.stop(t + 2.8);
-    }
-    bgmTimer = setTimeout(playNote, 1800 + Math.random() * 1200);
+// ---------- 背景音乐（MusicGen 生成的 mp3 循环播放） ----------
+let bgmAudio = null, bgmPlaying = false, bgmFadeRaf = null;
+// bgmGen：每次 startBgm/stopBgm 递增的世代号。淡入/淡出回调里比对世代号，
+// 不一致说明期间已被后续的 start/stop 取代，直接放弃——否则 400ms 内快速切两次静音，
+// 上一次的淡出回调会把刚启动的 BGM 直接 pause 掉。
+let bgmGen = 0;
+let bgmGestureHooked = false;         // 是否已挂上"下次用户手势重试播放"的一次性监听
+const BGM_SRC = 'art/audio/bgm_map.mp3';
+const BGM_VOL = 0.35; // 背景音乐音量（较低，不抢游戏音效）
+
+// 自动播放被浏览器拦截时：解锁 bgmPlaying，并在下一次用户手势时重试一次
+function hookBgmGestureRetry() {
+  if (bgmGestureHooked) return;
+  bgmGestureHooked = true;
+  const opts = { capture: true, once: true };
+  const retry = () => {
+    window.removeEventListener('pointerdown', retry, true);
+    window.removeEventListener('keydown', retry, true);
+    window.removeEventListener('touchend', retry, true);
+    bgmGestureHooked = false;
+    if (!MUTED && !bgmPlaying) { initAudio(); startBgm(); }
   };
-  playNote();
+  window.addEventListener('pointerdown', retry, opts);
+  window.addEventListener('keydown', retry, opts);
+  window.addEventListener('touchend', retry, opts);
+}
+
+export function startBgm() {
+  if (MUTED || bgmPlaying) return;
+  // 首次播放需用户手势已激活 AudioContext（initAudio 已处理），HTMLAudio 同样受自动播放策略约束
+  if (!bgmAudio) {
+    bgmAudio = new Audio(BGM_SRC);
+    bgmAudio.loop = true;
+    bgmAudio.preload = 'auto';
+  }
+  const gen = ++bgmGen;
+  bgmPlaying = true;
+  if (bgmFadeRaf) { cancelAnimationFrame(bgmFadeRaf); bgmFadeRaf = null; } // 抢占进行中的淡出
+  const audio = bgmAudio;
+  audio.volume = 0;                    // 从 0 淡入，避免突兀
+  const playPromise = audio.play();
+  if (playPromise && typeof playPromise.catch === 'function') {
+    playPromise.catch(() => {
+      if (gen !== bgmGen) return;      // 已被后续 start/stop 取代，不动状态
+      // 自动播放被拦截：把 bgmPlaying 置回 false（否则永久锁死，再也不会尝试），
+      // 并注册一次性手势监听，在下次真实用户手势时重试
+      bgmPlaying = false;
+      if (bgmFadeRaf) { cancelAnimationFrame(bgmFadeRaf); bgmFadeRaf = null; }
+      hookBgmGestureRetry();
+    });
+  }
+  // 简易线性淡入（约 1.5s）
+  const fadeStart = performance.now();
+  const fadeDur = 1500;
+  const fadeStep = () => {
+    if (gen !== bgmGen || !bgmPlaying || bgmAudio !== audio) return;
+    const k = Math.min(1, (performance.now() - fadeStart) / fadeDur);
+    audio.volume = BGM_VOL * k;
+    if (k < 1) bgmFadeRaf = requestAnimationFrame(fadeStep);
+    else bgmFadeRaf = null;
+  };
+  fadeStep();
 }
 export function stopBgm() {
   bgmPlaying = false;
-  if (bgmTimer) { clearTimeout(bgmTimer); bgmTimer = null; }
-  if (bgmGain && AC) { bgmGain.gain.setTargetAtTime(0, AC.currentTime, 0.6); }
+  const gen = ++bgmGen;
+  if (bgmFadeRaf) { cancelAnimationFrame(bgmFadeRaf); bgmFadeRaf = null; }
+  if (bgmAudio) {
+    // 快速淡出后暂停（0.4s），避免咔哒声
+    const audio = bgmAudio;
+    const v0 = audio.volume;
+    const t0 = performance.now();
+    const out = () => {
+      if (gen !== bgmGen || bgmAudio !== audio) return; // 期间又 start 了：放弃这次淡出，绝不 pause
+      const k = Math.min(1, (performance.now() - t0) / 400);
+      audio.volume = v0 * (1 - k);
+      if (k < 1) { bgmFadeRaf = requestAnimationFrame(out); }
+      else { audio.pause(); bgmFadeRaf = null; }
+    };
+    out();
+  }
 }
 
 // ---------- 二叉堆（A* 用） ----------

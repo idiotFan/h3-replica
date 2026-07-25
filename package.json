@@ -8,9 +8,18 @@
     "start": "python3 -m http.server 8000",
     "gen:glb": "node scripts/gen_glb.mjs",
     "gen:blender": "blender --background --python scripts/blender_export_models.py",
+    "compress:assets": "node scripts/compress_assets.mjs",
+    "compress:assets:dry": "node scripts/compress_assets.mjs --dry-run",
     "deploy": "./scripts/deploy.sh"
   },
   "dependencies": {
     "three": "^0.160.0"
+  },
+  "devDependencies": {
+    "@gltf-transform/core": "^4.4.1",
+    "@gltf-transform/extensions": "^4.4.1",
+    "@gltf-transform/functions": "^4.4.1",
+    "meshoptimizer": "^0.25.0",
+    "sharp": "^0.34.4"
   }
 }
