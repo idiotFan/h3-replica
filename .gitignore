@@ -1,5 +1,33 @@
+# ---------- 依赖 / 编辑器 / 系统 ----------
 node_modules/
 .DS_Store
 *.log
 .opencode/
 .claude/
+.trae/
+.venv/
+__pycache__/
+*.pyc
+
+# ---------- 密钥（绝不入库）----------
+.env
+MESHY_API_KEY*
+
+# ---------- 美术原件（体积大，不入库）----------
+# art/_src 是 Meshy 原件（约 154MB）与 art/export 备份的唯一副本，删了就没了。
+# scripts/deploy.sh 也 --exclude 'art/_src'，不会上线。
+art/_src/
+
+# art/preview 是 Blender/离线渲染出来的对比预览图（约 31MB PNG），只用于人工比对，
+# 既不上线（deploy.sh --exclude 'art/preview'）也不该进仓库。
+# 2026-07-25 之前它被误跟踪了 92 个文件，已用 `git rm -r --cached art/preview` 移出索引。
+art/preview/
+
+# 压缩前的模型备份（*.glb.bak / *.glb.bak2）—— 单个最大 8MB。
+# 2026-07-25 已从 art/export 搬到 art/_src/_export_bak/（连带被上一条 art/_src/ 挡住），
+# 这里再留一层通配，防止将来在 art/export 下重新生成时被 `git add -A` 带进仓库。
+# scripts/deploy.sh 也有 --exclude '*.bak*' + 服务端 find -delete 双重兜底。
+# 注意：.gitignore 只对未跟踪文件生效，已被跟踪的旧 .bak
+#（scripts/blender_export_models.py.bak*）不受影响。
+*.bak
+*.bak[0-9]
