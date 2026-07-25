@@ -18,6 +18,8 @@
     --candidates-dir DIR  候选文件输出目录（默认 <out_path 所在目录>/candidates）
     --promote IDX         生成完成后把第 IDX 个候选（1 起）原子安装到 out_path
     --keep-wav / --no-keep-wav   是否保留无损 wav（默认保留）
+    --decode-chunk-frames N      EnCodec 解码分块大小（帧，50Hz；0 关闭分块）
+    --decode-context-frames N    每块两侧多解码的上下文帧数（裁掉，保证块间无缝）
 
 设计要点（针对"音质太差"的三个根因）：
   1. 默认模型改为立体声 medium（facebook/musicgen-stereo-medium），参数量是 small 的 5 倍，
@@ -25,6 +27,13 @@
   2. mp3 编码从 `-qscale:a 4`（单声道下只有 ~67kbps）改为 CBR 192kbps，并保留原生采样率。
   3. 设备选择不再用 torch 版本号硬判断：实际跑一段 5 秒试生成探测 MPS 是否产出正常音频
      （非 NaN / 非静音 / 非爆音），能用就用 MPS，不能用才回落 CPU。
+
+第 4 个坑（实测踩到）：LM 采样能在 MPS 上跑完 1503 步，却在紧接着的 EnCodec 解码阶段
+`MPS backend out of memory` —— 因为解码是一次性把整段 token 展开到 32kHz 波形，
+最宽那层激活约 (帧数×640)×128×4B，30 秒就要几 GB，叠加常驻的 1.5B LM 直接爆。
+对策：把「LM 出 token」和「EnCodec 解码」拆开，解码按块做（每块两侧带上下文再裁掉，
+解码器感受野远小于上下文长度，因此与整段解码等价、块间无缝），峰值内存降到百 MB 级；
+万一仍失败就把 EnCodec 单独搬到 CPU 再分块解码（LM 仍留在 MPS）。
 """
 import argparse
 import gc
@@ -178,6 +187,87 @@ def atomic_install(src, dst):
     return dst
 
 
+# ---------------------------------------------------------------- 生成 / 解码
+
+def empty_accel_cache():
+    """尽力释放非 CPU 后端的缓存显存/统一内存。任何失败都无害地忽略。"""
+    try:
+        import torch
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:                                         # noqa: BLE001
+        pass
+
+
+def generate_tokens(model_obj, prompt, progress=True):
+    """只跑语言模型拿 EnCodec token，**不做**波形解码。
+
+    等价于 BaseGenModel.generate() 的前半段；拆开是为了让解码能单独分块 / 单独换设备。
+    """
+    attributes, prompt_tokens = model_obj._prepare_tokens_and_attributes([prompt], None)
+    assert prompt_tokens is None, "文本条件生成不应该有 prompt tokens"
+    return model_obj._generate_tokens(attributes, prompt_tokens, progress)
+
+
+def decode_chunked(compression_model, tokens, chunk_frames, context_frames):
+    """分块解码 [B, K, T] token → [B, C, S] 波形，结果搬到 CPU 拼接。
+
+    第 i 块解码 [i-ctx, i+chunk+ctx) 帧，再把两侧多出来的 ctx*hop 个采样裁掉。
+    EnCodec 解码器感受野只有几十毫秒，远小于默认 ctx（64 帧 = 1.28s），
+    所以裁剩下的中间段与「整段一次性解码」逐样本一致，块与块之间天然无缝。
+    """
+    import torch
+
+    hop = int(round(compression_model.sample_rate / compression_model.frame_rate))
+    # per_timestep 交织时时间轴按虚拟步走，块边界必须对齐，否则 decode 的整除断言会炸
+    vs = max(1, int(getattr(compression_model, "num_virtual_steps", 1) or 1))
+    total = tokens.shape[-1]
+    chunk = (int(chunk_frames) // vs) * vs
+    ctx = (int(context_frames) // vs) * vs
+
+    if chunk <= 0 or total <= chunk:
+        with torch.no_grad():
+            return compression_model.decode(tokens, None).cpu()
+
+    pieces, i = [], 0
+    while i < total:
+        end = min(i + chunk, total)
+        lo, hi = max(0, i - ctx), min(total, end + ctx)
+        with torch.no_grad():
+            seg = compression_model.decode(tokens[..., lo:hi], None)
+        head = (i - lo) * hop
+        tail = seg.shape[-1] - (hi - end) * hop
+        pieces.append(seg[..., head:tail].detach().cpu().clone())
+        del seg
+        empty_accel_cache()
+        i = end
+    return torch.cat(pieces, dim=-1)
+
+
+def decode_tokens_safely(model_obj, tokens, device, chunk_frames, context_frames):
+    """先在当前设备分块解码；OOM/报错就把 EnCodec（只有它，LM 不动）搬到 CPU 重试。"""
+    gc.collect()
+    empty_accel_cache()
+    try:
+        wav = decode_chunked(model_obj.compression_model, tokens, chunk_frames, context_frames)
+        return wav, f"在 {device} 上分块解码（chunk={chunk_frames} 帧, 上下文={context_frames} 帧）"
+    except Exception as exc:                                  # noqa: BLE001
+        if device == "cpu":
+            raise
+        log(f"[decode] {device} 解码失败（{type(exc).__name__}: {str(exc)[:160]}），"
+            f"把 EnCodec 单独搬到 CPU 重试（LM 仍留在 {device}）…")
+        gc.collect()
+        empty_accel_cache()
+        model_obj.compression_model.to("cpu")
+        gc.collect()
+        empty_accel_cache()
+        wav = decode_chunked(model_obj.compression_model, tokens.cpu(),
+                             chunk_frames, context_frames)
+        return wav, "EnCodec 已永久回落 CPU 分块解码"
+
+
 # ---------------------------------------------------------------- 设备探测
 
 _AUTOCAST_PATCHED = False
@@ -262,7 +352,9 @@ def choose_device(requested):
     notes = []
     if requested and requested != "auto":
         notes.append(f"设备由命令行指定为 {requested}")
-        return requested, requested != "cpu", notes
+        # 只有 CUDA 支持 autocast；显式指定 mps 时必须走 fp32，否则 disable_autocast
+        # 不会被调用，T5Conditioner 里那处 autocast 会带着 device_type='mps' 去撞 torch 2.1
+        return requested, requested == "cuda", notes
 
     if torch.cuda.is_available():
         notes.append("检测到 CUDA")
@@ -347,6 +439,11 @@ def build_parser():
     p.add_argument("--cfg-coef", type=float, default=3.0)
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--tag", default="bgm", help="候选文件名前缀（默认 bgm）")
+    p.add_argument("--decode-chunk-frames", type=int, default=500,
+                   help="EnCodec 分块解码的块大小（帧，50Hz，默认 500 ≈10s；0 关闭分块）。"
+                        "整段解码 30s 立体声在 16GB 机器上会 MPS OOM，这是主要防线")
+    p.add_argument("--decode-context-frames", type=int, default=64,
+                   help="每块两侧多解码并裁掉的上下文帧数（默认 64 ≈1.28s，远大于解码器感受野）")
     p.add_argument("--swap-guard-gb", type=float, default=18.0,
                    help="生成中 swap 超过此值就判定为内存颠簸并中止本候选（默认 18GB，0 关闭）。"
                         "16GB 机器上 medium fp32 进 swap 后速度会掉 40 倍，硬等没有意义")
@@ -413,10 +510,21 @@ def main():
             if device == "cuda":
                 torch.cuda.manual_seed_all(seed)
             gc.collect()
-            wav = model_obj.generate([prompt], progress=True)
+            tokens = generate_tokens(model_obj, prompt, progress=True)
+            lm_s = time.time() - t0
+            log(f"[lm] token 生成完成 {tuple(tokens.shape)}，用时 {lm_s:.0f}s，开始解码…")
+
+            wav, dec_note = decode_tokens_safely(
+                model_obj, tokens, device,
+                args.decode_chunk_frames, args.decode_context_frames)
+            del tokens
+            gc.collect()
+            empty_accel_cache()
+            log(f"[decode] {dec_note}")
             gen_s = time.time() - t0
 
             audio = wav[0].detach().cpu().float()      # [C, T]
+            del wav
             ok, detail = waveform_is_sane(audio)
             if not ok:
                 raise RuntimeError(f"生成的波形不合格: {detail}")

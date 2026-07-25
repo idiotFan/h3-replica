@@ -604,30 +604,48 @@ node scripts/meshy_gen.mjs \
 
 **用途**：本地部署 Meta MusicGen 模型生成游戏 BGM，替换 `art/audio/*.mp3`。
 
+> ⚠ **当前状态（2026-07-25）**：线上仍是**旧版 BGM**（`small` 模型 / 单声道 / **67kbps**），用户反馈音质差。
+> 升级用的脚本已改好、模型已缓存、MPS 加速已验证，但**生成太慢被叫停**（见下方「实测速率」），
+> 换 RTX 3060 机器重跑的方案待定。**这是一项未完成的 TODO。**
+
 **前置条件**：
-- Python 3.9+
-- 依赖：`pip3 install --user audiocraft`（首次会自动下 torch ~2GB）
-- 模型自动下载（首次约 1-2GB），缓存在 `~/.cache/torch/`
-- Mac 用 MPS 加速，Linux/Windows 用 CUDA
+- 本项目用 `.venv`（**不要升级 torch**，2.1.0 是 audiocraft 1.3.0 的兼容版本）：
+  ```bash
+  .venv/bin/python scripts/musicgen_bgm.py ...
+  ```
+- 模型缓存在 `~/.cache/huggingface/hub/`。`facebook/musicgen-stereo-medium` **已下载**（3.5GB），无需再等
+- Mac 用 MPS，Linux/Windows(WSL2) 用 CUDA
 
-**模型选择**：
+**旧版 BGM 音质差的三个原因（已诊断）**：
+1. 用了最低档的 `small`(300M) 模型
+2. 单声道 32kHz
+3. **mp3 只有 67kbps** —— `-qscale:a 4` 在单声道下算出来的，**这是音质杀手**（已在脚本里改成 192kbps CBR）
 
-| 模型 | 显存 | 质量 | 速度 | 推荐场景 |
-|------|------|------|------|----------|
-| `small` (300M) | 2GB | 一般 | 快（M1 约 30-60s/30s BGM） | ★★★ Mac 首选，本项目用此 |
-| `medium` (1.5B) | 8GB | 好 | 中 | 16GB+ Mac |
-| `large` (3.3B) | 16GB | 优秀 | 慢 | 32GB+ 工作站 |
+**模型选择 + 本机实测速率**：
 
-**调用方式**（`scripts/musicgen_bgm.py`）：
+| 模型 | 显存/内存 | 质量 | Mac MPS 实测 | 推荐场景 |
+|------|----------|------|-------------|----------|
+| `small` (300M) | 2GB | 一般 | 26s / 6s 音频 | 只适合快速试 prompt |
+| **`stereo-medium` (1.5B)** | ~8GB | 好，**立体声** | **123s / 6s 音频**（≈15 分钟/45 秒 BGM） | 当前选型，Mac 上偏慢 |
+| `large` / `stereo-large` (3.3B) | ~16GB | 优秀 | 16GB Mac 跑不动 | 需 12GB+ 显存的 N 卡 |
+
+**⚠ MPS 的两个坑（已绕过，勿重踩）**：torch 2.1 的 MPS ①不支持 `autocast`（只能 fp32，速度减半）②缺 `aten::_weight_norm_interface` 算子。
+探测过程记录在 `.bgm_logs/probe4.log`，脚本里已有可用的绕过方案，**不要重新探测**。
+
+**换 RTX 3060 机器跑（推荐，尚未实施）**：预计**快 3-5 倍**（45 秒 BGM 约 3-5 分钟）。原因：CUDA 上 fp16 可用、算子完整、显存带宽 360GB/s vs Mac 基础款约 100-120GB/s（自回归生成是**带宽瓶颈**）。
+更大的收益是 **12GB 显存能跑 `large`**——音质提升比省下的时间值钱，而这正是原始诉求。
+**用 WSL2 而非 PowerShell**：audiocraft 是 Linux 优先的栈，Windows 原生常卡在 xformers 编译 / torchaudio 后端 / ffmpeg 路径；WSL2 的 CUDA 直通开销可忽略（驱动装在 Windows 宿主，WSL 内 `nvidia-smi` 能看到卡即通）。
+注意：模型缓存和工作目录放 WSL 内部（`~/`），**别放 `/mnt/c/`**（跨文件系统 IO 慢一个数量级）。
+
+**调用方式**（`scripts/musicgen_bgm.py`，已升级）：
 
 ```bash
-python3 scripts/musicgen_bgm.py "<prompt>" "<输出路径>" [时长秒] [模型]
-
-# 示例：生成地图探索 BGM
-python3 scripts/musicgen_bgm.py \
-  "epic medieval fantasy exploration music, orchestral, lute, flute, gentle adventure theme, instrumental, loopable" \
-  "art/audio/bgm_map.mp3" 30 small
+.venv/bin/python scripts/musicgen_bgm.py "<prompt>" "<输出路径>" [时长秒] [模型]
 ```
+
+新增可选参数：`--candidates N`（多候选）、`--loop-fade N`（尾头交叉淡化 N 秒做无缝循环）、192kbps CBR 编码已是默认。
+**已知缺陷**：脚本目前是「全部候选生成完才落盘」，中途被中断会全部丢失（已因此丢过 2 个候选）。
+下次动它时**先改成每生成完一个立刻写盘**。
 
 **本项目 BGM 风格规范**：
 - **地图探索**：轻柔冒险，鲁特琴+长笛+柔和弦乐，中速
@@ -639,10 +657,15 @@ prompt 关键词：`medieval, fantasy, orchestral, instrumental, loopable, game 
 避免：`vocals, lyrics, singing, modern, electronic`
 
 **注意事项**：
-- 输出采样率 32000Hz，脚本内自动转 mp3
-- 生成的音乐是单段，前端用 `bgmAudio.loop = true` 循环
+- 输出采样率 32000Hz，脚本内自动转 mp3（现为 192kbps CBR）
+- 生成的音乐是单段，前端用 `bgmAudio.loop = true` 循环——**接缝处会有可听突变**，务必用 `--loop-fade` 处理
 - MIT 许可，可商用
-- 替换后改 `js/utils.js` 的 `BGM_SRC` 常量指向新文件
+- 输出路径就是 `art/audio/bgm_map.mp3` 时无需改代码；换文件名才要动 `js/utils.js` 的 `BGM_SRC`
+- **落地要用原子写**（先写 `.tmp` 再 `mv`），否则可能被并行的 `deploy.sh` 抓到写了一半的文件
+
+**关于 MusicGen 的天花板**：它是 2023 年的模型，即使 `large` 也只到「能听、不出戏」，达不到商业游戏 OST 质感。
+如果换 `large` 后仍不满意，比起继续堆硬件，这两个方向更有效：
+① 换模型（Stable Audio Open，音质明显更好但显存要求更高）；② 直接用免费商用的中世纪奇幻 BGM 素材库（质量下限比 AI 生成高得多）。
 
 ---
 
@@ -657,8 +680,10 @@ prompt 关键词：`medieval, fantasy, orchestral, instrumental, loopable, game 
 |--------|------|----------------|
 | P1 | **SW 的 CDN 分支可能永不 settle** | `sw.js:94-104` 的 stale-while-revalidate：`cached` 为空且网络既不 resolve 也不 reject 时，`e.respondWith()` 的 Promise 会挂死。实测后果是新 SW 装好后 `waiting → active` 的交接被卡十几秒。修复方向：`Promise.race` 加超时兜底，或 `cached` 为空时直接放行不 `respondWith`。详见 §4.7 末尾 |
 | P1 | **BGM 关服务器后仍播放** | `art/audio/bgm_map.mp3` 已被浏览器完整缓冲，关服务器不停止。修复方向：`pagehide`/`visibilitychange` 触发 `stopBgm()`（当前 `main.js:335` 只挂了 `beforeunload → saveGame()`，没挂 `stopBgm`） |
+| **P1** | **BGM 音质差（未完成）** | 线上仍是 `small` 模型 / 单声道 / **67kbps**。升级脚本已就绪（stereo-medium + 192kbps + 无缝循环 + 多候选）、3.5GB 模型已缓存、MPS 加速已验证，但 Mac 上 **15 分钟才出 45 秒**，跑三个候选要 45 分钟，已叫停。**建议换 RTX 3060 机器（WSL2）重跑，顺带上 `large`**。完整方案、实测速率、避坑记录见 §7.2 |
+| P2 | **战斗中偶发怪物模型消失** | 用户报告「打斗过程中某个怪物的模型就不见了」。**已尝试自动化复现但未捕获**：插桩跑了两场完整战斗（含近战/反击/死亡），每帧对每个存活单位检查 7 项不变量（脱离场景 / `visible=false` / 缩放≈0 / 无 mesh / 材质透明度<0.08 / 位置偏离所属六边形>4.5 / 沉入地下），**0 次异常**。静态也已排除：无代码把战场单位设为不可见、单位无 frustumCulled 问题、队伍环几何是每单位新建（不受死亡单位 dispose 连累）、共享贴图/几何的 `shared` 标记确实生效。**下次排查需要更具体的复现条件**：是否为刚阵亡的单位（死亡动画是设计如此）、头顶数字标签是否还在（在=渲染层问题，不在=逻辑层）、是否特定兵种（幽灵本身就是半透明设计）。探针脚本见 scratchpad 的 `ghost2.mjs`，可复用 |
 | P2 | **骨骼动画缺失** | 22 个 glb 全部无 armature（Meshy 版是单 mesh，旧 Blender 版是 bmesh 原语）。真骨骼动画需重制 **17 个角色模型**（15 兵种 + 2 英雄；建筑不需要），是纯美术工程、成本高。当前程序化动画（颠簸/晃动/呼吸，见 §六）观感尚可，**因此从 P0 降级为 P2**——它不影响可玩性，也不影响线上稳定性，长期挂在 P0 会挤占真正紧急项的注意力 |
-| P2 | **朝向不一致风险** | Meshy 生成时已强制 `side profile facing left`，但个别模型可能仍有偏差，必要时在 `manifest.js` 给该 key 加 `rotY` 修正。⚠ 旧文档写的批量测量脚本 `scripts/probe_units.py` **并不存在**（`scripts/` 下只有 blender_export_models / compress_assets / gen_glb / meshy_gen / musicgen_bgm / render_previews / deploy），要批量测朝向得先写这个脚本 |
+| **P1** | **行进方向与模型头朝向不符（"倒着走""横着走"）** | **根因已定位，未修**。详见下方 §8.3。一句话：`lookAt()` 之后的程序化动画直接给 `rotation.x` / `rotation.z` 赋值，把朝北方向的欧拉表示打碎了。**不要用 rotY 去"修"它**——17 个模型的朝向全部正确 |
 | P3 | **多英雄** | 仅 1 个玩家英雄，H3 支持多英雄分头行动 |
 | P3 | **城镇建设** | 当前只有招募 + 兵营升级，缺建筑树 |
 | P3 | **法术等级** | 所有法术从开始可用，应绑定魔法塔等级 |
@@ -676,6 +701,46 @@ prompt 关键词：`medieval, fantasy, orchestral, instrumental, loopable, game 
 | P1 | **怪物 scale 与 yOffset 冲突** | **已修**，但当时的结论方向是反的：正确做法是缩放 **wrapper**（补偿量随之缩放，底部始终贴合 y=0），不是缩放 `userData.root`。见 §六 缩放约定 |
 | P1 | **后台资产换入时点亮雾下对象** | **已修**。`refreshObjectMeshes()` 新建的 mesh 默认 `visible=true`，实测 41 个雾下对象有 20 个突然显形；现在换入后重放一次迷雾 |
 | P2 | **模型原点不在脚底** | 已用 `factory.js finalize()` 的 Box3 自动抬升解决 |
+
+### 8.3 朝向 bug 完整根因（2026-07-25 诊断，**待修**）
+
+**先排除误判**：17 个角色 glb（15 兵种 + 2 英雄）的朝向**全部正确**，在 three.js 世界空间里都面朝 `+Z`，与 `art/_src/_export_bak/` 里的旧 Blender 原件完全一致。Meshy 的 `side profile view facing left` 提示词**没有**破坏导出朝向。`manifest.js` 里 **不需要任何 rotY**——用 rotY 去修是错的方向，会把本来对的模型转歪。
+
+**真正的根因在动画代码**：所有移动点都先调 `mesh.lookAt(...)`（正确，`Object3D.lookAt` 让局部 +Z 指向目标），紧接着"颠簸/摇晃"动画又给 `mesh.rotation.x` 和 `mesh.rotation.z` **单独赋值**。
+
+问题在于 three.js 对**含 -Z 分量（朝北）**的朝向，其欧拉 XYZ 分解结果是 `(±180°, 180°−θ, ±180°)` 而不是 `(0, θ, 0)`——数学上等价，但表示是退化的。单独给 `.x` / `.z` 赋值会**静默丢掉那对 ±180°**，只剩 `180°−θ`，也就是**朝向被绕世界 X 轴镜像了**。
+
+实测朝向误差：
+
+| 行进方向 | 误差 | 表现 |
+|---------|------|------|
+| 东 / 西 / 南 / 东南 / 西南 | 0° | 正常 |
+| **北** | **180°** | 倒着走 |
+| **东北 / 西北** | **90°** | 横着走 |
+
+且待机循环每帧都在重复这个破坏，所以朝北走完一步后，人物会立刻"啪"地转回来。
+
+**全部受影响的代码位置**：
+
+| 文件:行 | 说明 |
+|---------|------|
+| `js/map.js:1294-1295` | **主犯**。玩家英雄 `walk()` 的 onUpdate，在 1286 行 lookAt 之后覆写 rotation.x/z |
+| `js/map.js:1305-1306` | `walk()` onDone 把 x/z 归零 → 错误朝向**固化**（纯朝北时英雄最终停在 (0,0,0)，即面朝正南） |
+| `js/map.js:1579` | 待机循环每帧执行，站着不动也会被翻掉 |
+| `js/map.js:895-896, 901-902` | 敌方英雄 `moveEnemyHero()`，同样模式（lookAt 在 887 行） |
+| `js/map.js:1558` | 敌方英雄待机，同样受影响 |
+| `js/map.js:1538` | 地图野怪待机。**当前没坏**（野怪从不被 lookAt，rotation 恒为 (0,0,0)），但是同款隐患——将来若给野怪加朝向，必须先修这里 |
+| `js/battle.js:605-606, 613-614` | `moveActive()`，lookAt 在 595 行。战场单位向低 row（-Z）移动时同样出错 |
+| `js/battle.js:1101` | 战场待机（`!anim.legs` 时生效）。`attack()`（722-723 行）会给攻防双方都 lookAt，任何含 -Z 分量的朝向都会在下一个非 busy 帧被这里打碎 |
+| `js/battle.js:268` | 初始布阵 `rotation.y = ±π/2` **是对的**：玩家在 col 0-1 面朝 +X、敌方在 col 11-12 面朝 −X，纯 ±90° 能干净分解——这正是为什么开局看着正常、**第一次移动/攻击后才出问题** |
+| `js/assets/factory.js:206` | `rotY` 机制存在且可用，当前无资产使用。**保持现状是对的** |
+
+**修复方向**（未实施，留给下一轮）：不要再对 `rotation.x/.z` 单独赋值。两种改法：
+
+1. **把颠簸/摇晃挪到子节点**——外层节点只承载 lookAt 的朝向，内层子节点做动画偏移，两者互不干扰（推荐，最干净）
+2. **改用四元数叠加**——先 `lookAt` 得到朝向四元数，再乘一个表示颠簸的局部旋转四元数，全程不碰欧拉分量
+
+改完必须**四向实测**（+X / −X / +Z / −Z），只测东西向会漏掉这个 bug——这正是它此前一直没被发现的原因。
 
 ---
 
@@ -766,7 +831,12 @@ __game.readSave()                        // 读取存档
 
 ---
 
-*文档版本：**2026-07-25** · 与代码库当前状态同步。*
+*文档版本：**2026-07-25（晚间更新）** · 与代码库当前状态同步。*
+
+*本次更新补入三项未完成 TODO 的完整交接信息：*
+*① **朝向 bug**（§8.3）—— 根因已精确定位到 9 处代码位置，含实测误差表与两种修法，**注意不要用 rotY 去修**；*
+*② **BGM 音质**（§7.2）—— 升级方案就绪但 Mac 上太慢已叫停，含实测速率、MPS 避坑记录、RTX 3060 + WSL2 迁移建议；*
+*③ **战斗中怪物消失**（§8.1）—— 自动化复现失败的完整记录与已排除项，列出下次排查所需的具体信息。*
 
 *本次（2026-07-25）文档改动：§一 加 `gen:blender/gen:glb` 覆盖 Meshy 模型的危险警告、更新部署排除清单与
 测试项数（110 项实测）；§二 结构树按实测体积重写并补上 `art/_src` / `art/audio` / 全部 scripts；
