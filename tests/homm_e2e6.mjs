@@ -19,6 +19,16 @@ function check(name, cond, extra = '') {
   else { fail++; console.log(`  ✘ ${name} ${extra}`); }
 }
 
+// 冷启动要预加载全部 glTF（实测约 9s），固定 sleep 不可靠，轮询等地图就绪
+async function waitMapReady(timeoutMs = 40000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    try { if (await evl(`!!(window.__game && __game.world && __game.world.built && __game.state.mode === 'map')`)) return true; } catch (e) {}
+    await sleep(300);
+  }
+  return false;
+}
+
 async function main() {
   let wsUrl = null;
   for (let i = 0; i < 30 && !wsUrl; i++) {
@@ -35,7 +45,8 @@ async function main() {
   await send('Runtime.enable');
   await send('Page.enable');
   await send('Page.navigate', { url: 'http://localhost:8000/?smoke=map' });
-  await sleep(8000);
+  check('地图就绪', await waitMapReady());
+  await sleep(500);
 
   console.log('== 1. 警戒圈数据 ==');
   check('存在野怪', await evl(`[...__game.world.objects.values()].some(o => o.kind === 'monster')`));

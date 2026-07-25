@@ -19,6 +19,29 @@ function check(name, cond, extra = '') {
   else { fail++; console.log(`  ✘ ${name} ${extra}`); }
 }
 
+// 等待 boot 完成（难度按钮解禁）。boot 是异步预加载 glTF，冷启动可能要 10s 以上。
+async function waitStartReady(timeoutMs = 40000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    try {
+      if (await evl(`(() => { const b = document.querySelector('button[data-diff="normal"]'); return !!(window.__game && b && !b.disabled); })()`)) return true;
+    } catch (e) {}
+    await sleep(300);
+  }
+  return false;
+}
+// 点难度按钮开局（旧版是 #btn-start，改版后是 3 档难度按钮）
+async function clickStart(diff = 'normal') {
+  await waitStartReady();
+  await evl(`document.querySelector('button[data-diff="${diff}"]').click()`);
+  const t0 = Date.now();
+  while (Date.now() - t0 < 20000) {
+    if (await evl(`__game.state.mode === 'map'`)) return true;
+    await sleep(300);
+  }
+  return false;
+}
+
 async function main() {
   let wsUrl = null;
   for (let i = 0; i < 30 && !wsUrl; i++) {
@@ -41,13 +64,11 @@ async function main() {
   await sleep(3000);
   await evl(`localStorage.clear()`);
   await send('Page.navigate', { url: 'http://localhost:8000/' });
-  await sleep(5000);
+  await waitStartReady();
   check('开始画面显示', await evl(`__game.state.mode === 'start' && !document.getElementById('start-screen').classList.contains('hidden')`));
   check('世界已构建作背景', await evl(`__game.world.built === true`));
   check('继续按钮隐藏', await evl(`document.getElementById('btn-continue-save').classList.contains('hidden')`));
-  await evl(`document.getElementById('btn-start').click()`);
-  await sleep(1500);
-  check('点击开始进入地图', await evl(`__game.state.mode === 'map'`));
+  check('点击开始进入地图', await clickStart('normal'));
 
   console.log('== 2. 敌方阵营存在性 ==');
   check('敌方城堡已生成', await evl(`[...__game.world.objects.values()].some(o => o.kind === 'enemyCastle')`));
@@ -130,9 +151,8 @@ async function main() {
   console.log('== 6. 新游戏重建 ==');
   // 回开始画面只能通过刷新，模拟：刷新后点开始
   await send('Page.navigate', { url: 'http://localhost:8000/' });
-  await sleep(5000);
-  await evl(`document.getElementById('btn-start').click()`);
-  await sleep(2500);
+  await clickStart('normal');
+  await sleep(1500);
   check('新游戏世界重建', await evl(`__game.state.mode === 'map' && __game.state.day === 1 && __game.world.fromSave === false`));
   check('新游戏城堡恢复', await evl(`[...__game.world.objects.values()].some(o => o.kind === 'enemyCastle')`));
 

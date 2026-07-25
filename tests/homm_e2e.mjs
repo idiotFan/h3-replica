@@ -34,6 +34,16 @@ function check(name, cond, extra = '') {
   else { failCount++; console.log(`  ✘ ${name} ${extra}`); }
 }
 
+// 轮询等待某个条件为真（比固定 sleep 稳）
+async function waitFor(expr, timeoutMs = 20000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    try { if (await evl(`!!(${expr})`)) return true; } catch (e) {}
+    await sleep(300);
+  }
+  return false;
+}
+
 async function main() {
   // 连接
   let wsUrl = null;
@@ -55,7 +65,9 @@ async function main() {
   await send('Runtime.enable');
   await send('Page.enable');
   await send('Page.navigate', { url: URL_GAME });
-  await sleep(6000);
+  // 冷启动要预加载全部 glTF（约 10s），固定 sleep 会偶发抢跑，改成轮询
+  await waitFor(`window.__game && __game.state.mode === 'map'`, 40000);
+  await sleep(500);
 
   console.log('== 1. 地图模式 ==');
   check('游戏已启动', await evl(`window.__game && __game.state.mode === 'map'`));
@@ -170,7 +182,8 @@ async function main() {
     await evl(`(() => { const b = __game.getBattle(); if (b && !b.over && b.aliveStacks(1).length) { b.applyDamage(b.aliveStacks(1)[0], 99999); b.checkEnd(); } })()`);
     await sleep(500);
   }
-  await sleep(2500);
+  // 结算前有一段 playEndCinematic 动画（>2.5s），必须轮询等弹窗
+  await waitFor(`!document.getElementById('modal').classList.contains('hidden')`, 20000);
   check('胜利结算弹出', await evl(`!document.getElementById('modal').classList.contains('hidden')`));
   check('胜利标题正确', await evl(`(() => {
     const t = document.querySelector('.cg-title') || document.querySelector('.end-title');

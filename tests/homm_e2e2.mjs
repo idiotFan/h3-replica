@@ -44,10 +44,21 @@ async function waitPlayerTurn() {
   return false;
 }
 
+// 冷启动要预加载全部 glTF，固定 sleep 不可靠，轮询等地图就绪
+async function waitMapReady(timeoutMs = 40000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    try { if (await evl(`!!(window.__game && __game.state.mode === 'map' && document.querySelector('#minimap canvas'))`)) return true; } catch (e) {}
+    await sleep(300);
+  }
+  return false;
+}
+
 async function main() {
   await connect();
   await send('Page.navigate', { url: 'http://localhost:8000/?smoke=map' });
-  await sleep(6000);
+  await waitMapReady();
+  await sleep(500);
 
   console.log('== 1. 小地图与路径预览 ==');
   check('小地图 canvas 存在', await evl(`!!document.querySelector('#minimap canvas')`));
