@@ -35,29 +35,29 @@ const B = 'art/export/buildings';
  */
 export const UNIT_ASSETS = {
   // ---- Meshy AI 重制（单 mesh / 无命名节点 / 无动画 clip）----
-  pikeman:   { path: `${U}/pikeman.glb`,   scale: 1,    polyBudget: 1500, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
-  archer:    { path: `${U}/archer.glb`,    scale: 1,    polyBudget: 1500, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
-  griffin:   { path: `${U}/griffin.glb`,   scale: 1,    polyBudget: 3500, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
-  swordsman: { path: `${U}/swordsman.glb`, scale: 1,    polyBudget: 2500, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
-  champion:  { path: `${U}/champion.glb`,  scale: 1,    polyBudget: 4000, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
-  wolf:      { path: `${U}/wolf.glb`,      scale: 1,    polyBudget: 2000, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
-  skeleton:  { path: `${U}/skeleton.glb`,  scale: 1,    polyBudget: 1500, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
-  orc:       { path: `${U}/orc.glb`,       scale: 1,    polyBudget: 2000, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
-  ghost:     { path: `${U}/ghost.glb`,     scale: 1,    polyBudget: 2500, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
-  dragon:    { path: `${U}/dragon.glb`,    scale: 1.15, polyBudget: 6000, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
+  pikeman:   { path: `${U}/pikeman.glb`,   targetH: 1.2,    polyBudget: 1500, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
+  archer:    { path: `${U}/archer.glb`,    targetH: 1.2,    polyBudget: 1500, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
+  griffin:   { path: `${U}/griffin.glb`,   targetH: 1.4,    polyBudget: 3500, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
+  swordsman: { path: `${U}/swordsman.glb`, targetH: 1.3,    polyBudget: 2500, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
+  champion:  { path: `${U}/champion.glb`,  targetH: 1.55,    polyBudget: 4000, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
+  wolf:      { path: `${U}/wolf.glb`,      targetH: 0.85,    polyBudget: 2000, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
+  skeleton:  { path: `${U}/skeleton.glb`,  targetH: 1.15,    polyBudget: 1500, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
+  orc:       { path: `${U}/orc.glb`,       targetH: 1.3,    polyBudget: 2000, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
+  ghost:     { path: `${U}/ghost.glb`,     targetH: 1.25,    polyBudget: 2500, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
+  dragon:    { path: `${U}/dragon.glb`,    targetH: 1.8, polyBudget: 6000, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
   // ---- 精锐兵：同为 Meshy AI 重制（2026-07-25 替换，单 mesh / 无命名节点 / 无动画）----
-  pikeman2:  { path: `${U}/pikeman2.glb`,  scale: 1.05, polyBudget: 1800, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
-  archer2:   { path: `${U}/archer2.glb`,   scale: 1.05, polyBudget: 1800, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
-  griffin2:  { path: `${U}/griffin2.glb`,  scale: 1.05, polyBudget: 3800, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
-  swordsman2:{ path: `${U}/swordsman2.glb`,scale: 1.05, polyBudget: 2800, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
-  champion2: { path: `${U}/champion2.glb`, scale: 1.05, polyBudget: 4200, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
+  pikeman2:  { path: `${U}/pikeman2.glb`,  targetH: 1.27, polyBudget: 1800, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
+  archer2:   { path: `${U}/archer2.glb`,   targetH: 1.27, polyBudget: 1800, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
+  griffin2:  { path: `${U}/griffin2.glb`,  targetH: 1.48, polyBudget: 3800, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
+  swordsman2:{ path: `${U}/swordsman2.glb`,targetH: 1.38, polyBudget: 2800, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
+  champion2: { path: `${U}/champion2.glb`, targetH: 1.64, polyBudget: 4200, anims: ['idle', 'walk', 'attack', 'hit', 'death'], singleMesh: true, fallback: 'primitive' },
 };
 
 // 英雄两侧本来就是两个不同模型（外形/配色已区分），整体染色取小值免得糊掉贴图，
 // 敌我辨识主要交给底座光环。
 export const HERO_ASSETS = {
-  player: { path: `${H}/hero_player.glb`, scale: 1, polyBudget: 4000, anims: ['idle', 'walk'], teamColorMeshes: ['TeamColor'], singleMesh: true, teamTint: 0.12, fallback: 'primitive' },
-  enemy:  { path: `${H}/hero_enemy.glb`, scale: 1, polyBudget: 4000, anims: ['idle', 'walk'], teamColorMeshes: ['TeamColor'], singleMesh: true, teamTint: 0.12, fallback: 'primitive' },
+  player: { path: `${H}/hero_player.glb`, targetH: 1.55, polyBudget: 4000, anims: ['idle', 'walk'], teamColorMeshes: ['TeamColor'], singleMesh: true, teamTint: 0.12, fallback: 'primitive' },
+  enemy:  { path: `${H}/hero_enemy.glb`, targetH: 1.55, polyBudget: 4000, anims: ['idle', 'walk'], teamColorMeshes: ['TeamColor'], singleMesh: true, teamTint: 0.12, fallback: 'primitive' },
 };
 
 export const BUILDING_ASSETS = {

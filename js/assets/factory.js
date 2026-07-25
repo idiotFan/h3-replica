@@ -191,7 +191,18 @@ function finalize(root, def, side) {
   if (!root) return null;
   // manifest 标记优先，名字探测兜底（资产被换成 Meshy 重制版时自愈）
   const single = isSingleMesh(def) || detectSingleMesh(root);
-  if (def?.scale && def.scale !== 1) root.scale.multiplyScalar(def.scale);
+  // 目标高度归一化：AI 生成的模型（Meshy）不论体型都被归一化到最长轴 ≈1.9，
+  // 直接用固定 scale 会让相对体型全乱（实测黑龙 1.45 反而矮于枪兵 1.90）。
+  // 改为按 manifest 的 targetH 把渲染高度对齐到设计值，换任何模型都自愈。
+  // 必须放在下面 Box3 落地计算之前，否则抬升量会按旧尺寸算。
+  if (def?.targetH) {
+    root.updateMatrixWorld(true);
+    const b0 = new THREE.Box3().setFromObject(root);
+    const h0 = b0.max.y - b0.min.y;
+    if (isFinite(h0) && h0 > 1e-4) root.scale.multiplyScalar(def.targetH / h0);
+  } else if (def?.scale && def.scale !== 1) {
+    root.scale.multiplyScalar(def.scale);   // 无 targetH 的资产（建筑）沿用固定倍率
+  }
   if (def?.rotY) root.rotation.y += def.rotY;   // 朝向修正（glb 默认朝向 → 项目 -Y 前方）
   if (single) normalizeSingleMeshMaterial(root);
   if (side !== undefined) {
