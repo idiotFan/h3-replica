@@ -1,7 +1,7 @@
 // ================= 六边形战场回合制战斗 =================
 import * as THREE from 'three';
 import { UNITS, BATTLE, SPELLS } from './config.js';
-import { DIFF } from './difficulty.js';
+import { DIFF, damageCoef } from './difficulty.js';
 import { hexToWorld, hexNeighbors, hexDistance, Tweens, easeLinear, easeOut, rand, randInt, clamp, sfx, disposeObject3D } from './utils.js';
 import { createUnit, makeObstacle, makeTree } from './assets/factory.js';
 import { makeDetailTexture, makeSkyMaterial, makeCloudSprite } from './textures.js';
@@ -600,10 +600,19 @@ export class Battle {
           st.mesh.position.y = UNIT_Y + Math.abs(Math.sin(k * Math.PI)) * (st.t.fly ? 0.5 : 0.15);
           const legs = st.mesh.userData.anim && st.mesh.userData.anim.legs;
           if (legs) for (let li = 0; li < legs.length; li++) legs[li].rotation.x = Math.sin(k * Math.PI * 2) * 0.5 * (li % 2 ? 1 : -1);
+          // 单 mesh glb 模型：整体前后倾斜模拟步态（无骨骼也能有动感）
+          if (st.mesh.userData.fromGltf && !legs) {
+            st.mesh.rotation.x = Math.sin(k * Math.PI * 4) * 0.08;   // 前后颠簸
+            st.mesh.rotation.z = Math.sin(k * Math.PI * 2) * 0.04;   // 左右轻晃
+          }
         },
         onDone: () => {
           const legs = st.mesh.userData.anim && st.mesh.userData.anim.legs;
           if (legs) for (const leg of legs) leg.rotation.x = 0;
+          if (st.mesh.userData.fromGltf && !legs) {
+            st.mesh.rotation.x = 0;
+            st.mesh.rotation.z = 0;
+          }
           i++; step();
         },
       });
@@ -624,9 +633,12 @@ export class Battle {
     const base = (att.blessRounds > 0
       ? Math.round(att.t.dmg[1] * DIFF.blessBonus)
       : randInt(att.t.dmg[0], att.t.dmg[1])) * att.count;
+    // 倍率系数按「攻击方阵营」取组：玩家组与敌方组随难度反向变化
+    // （单组时困难档会把敌方输出一起削弱，方向反了）
+    const C = damageCoef(att.side);
     let mult = A >= D
-      ? 1 + DIFF.damageAtkFactor * Math.min(A - D, DIFF.damageAtkCap)
-      : Math.max(0.3, 1 - DIFF.damageDefFactor * Math.min(D - A, DIFF.damageDefCap));
+      ? 1 + C.atkFactor * Math.min(A - D, C.atkCap)
+      : Math.max(C.minMult, 1 - C.defFactor * Math.min(D - A, C.defCap));
     if (!shoot && att.t.shots) mult *= DIFF.shooterMeleeMult; // 射手近战减伤
     if (att.side === 0 && !shoot) mult *= 1 + 0.1 * this.skill('offense');   // 进攻术
     if (def.side === 0) mult *= 1 - 0.07 * this.skill('armorer');            // 防御术
@@ -991,7 +1003,11 @@ export class Battle {
     const A = att.t.atk + heroA;
     let D = def.t.def + heroD;
     if (def.defending) D = Math.round(D * DIFF.defendBonus);
-    let mult = A >= D ? 1 + DIFF.damageAtkFactor * Math.min(A - D, DIFF.damageAtkCap) : Math.max(0.3, 1 - DIFF.damageDefFactor * Math.min(D - A, DIFF.damageDefCap));
+    // 与 calcDamage 保持同一套分阵营系数，否则预估与实伤会对不上
+    const C = damageCoef(att.side);
+    let mult = A >= D
+      ? 1 + C.atkFactor * Math.min(A - D, C.atkCap)
+      : Math.max(C.minMult, 1 - C.defFactor * Math.min(D - A, C.defCap));
     if (!shoot && att.t.shots) mult *= DIFF.shooterMeleeMult;
     if (att.side === 0 && !shoot) mult *= 1 + 0.1 * this.skill('offense');
     if (def.side === 0) mult *= 1 - 0.07 * this.skill('armorer');
@@ -1077,7 +1093,14 @@ export class Battle {
     // 待机动画 + 标签位置
     for (const st of this.stacks) {
       if (!st.alive) continue;
-      if (!this.busy) st.mesh.position.y = UNIT_Y + Math.sin(this.time * 2.5 + st.id) * 0.02;
+      if (!this.busy) {
+        st.mesh.position.y = UNIT_Y + Math.sin(this.time * 2.5 + st.id) * 0.02;
+        // 单 mesh glb 模型待机：轻微呼吸式起伏
+        if (st.mesh.userData.fromGltf) {
+          const anim = st.mesh.userData.anim;
+          if (!anim || !anim.legs) st.mesh.rotation.x = Math.sin(this.time * 1.5 + st.id) * 0.015;
+        }
+      }
       const anim = st.mesh.userData.anim;
       if (anim) {
         if (anim.wings) {

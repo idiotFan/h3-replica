@@ -35,6 +35,7 @@ export class WorldMap {
     this.pathTiles = new Set();
     this.moving = false;
     this.pending = null;      // 移动结束后的待触发对象
+    this._undoState = null;   // 撤销快照 { x, y, movePoints, explored:Uint8Array, pending:[] }
     this.hero = { x: 4, y: MH - 6, movePoints: DIFF.moveMax, moveMax: DIFF.moveMax };
     this.time = 0;
     this.animated = [];       // 需要待机动画的网格
@@ -613,15 +614,20 @@ export class WorldMap {
       this.addObject('pickup', p.x, p.y, { res: pk, amount });
     }
 
+    // 决胜战兵力随难度缩放（difficulty.js 的 bossScale：0.7 / 1.0 / 1.4）。
+    // Math.max(1, …) 不可省略：简单档 dragon 2*0.7=1.4 尚可，但任何 count 为 1 的
+    // 兵种乘 0.7 后会被 round 成 0，整队消失。
+    const bs = n => Math.max(1, Math.round(n * DIFF.bossScale));
+
     // Boss 黑龙巢穴
     this.addObject('monster', this.bossPos.x, this.bossPos.y, {
-      stacks: [{ type: 'dragon', count: 2 }, { type: 'ghost', count: 10 }, { type: 'orc', count: 15 }],
+      stacks: [{ type: 'dragon', count: bs(2) }, { type: 'ghost', count: bs(10) }, { type: 'orc', count: bs(15) }],
       reward: 5000, boss: true, name: '黑龙巢穴',
     });
 
     // 敌方城堡（定期派出敌方英雄）
     this.addObject('enemyCastle', this.enemyCastlePos.x, this.enemyCastlePos.y, {
-      stacks: [{ type: 'orc', count: 12 }, { type: 'skeleton', count: 18 }, { type: 'wolf', count: 10 }, { type: 'ghost', count: 6 }],
+      stacks: [{ type: 'orc', count: bs(12) }, { type: 'skeleton', count: bs(18) }, { type: 'wolf', count: bs(10) }, { type: 'ghost', count: bs(6) }],
       reward: 3000, name: '敌方城堡',
     });
     used.add(key(this.enemyCastlePos.x, this.enemyCastlePos.y));
@@ -690,6 +696,9 @@ export class WorldMap {
     else if (kind === 'monster') {
       const mainType = data.stacks[0].type;
       mesh = createUnit(mainType, 1);
+      // scale 必须作用到 factory.finalize 返回的 wrapper：wrapper 内 root.position.y = -minY
+      // 是自动落地补偿量，只缩放 root 会让补偿量不跟着放大，模型底部沉进地面（boss 龙尤其明显）。
+      // 缩放 wrapper 则补偿量一起缩放，底部始终贴合 y=0。与 refreshObjectMeshes 保持一致。
       mesh.scale.multiplyScalar(data.boss ? 1.5 : 1.15);
       const total = data.stacks.reduce((s, st) => s + st.count, 0);
       labelText = data.name || `${UNITS[mainType].name} x${total}`;
@@ -745,6 +754,7 @@ export class WorldMap {
         else if (obj.kind === 'mine') neu = createMine(obj.data.mine);
         else if (obj.kind === 'monster') {
           neu = createUnit(obj.data.stacks[0].type, 1);
+          // 与 addObject 一致：缩放 wrapper（自动落地补偿量随之缩放，不会沉地）
           neu.scale.multiplyScalar(obj.data.boss ? 1.5 : 1.15);
         }
       } catch (e) { continue; }
@@ -788,6 +798,9 @@ export class WorldMap {
         this.heroMesh = neu;
       }
     }
+    // 新建的 mesh 默认 visible=true，会把雾下的野怪/敌堡/敌方英雄一起点亮
+    // （实测后台资产加载完成时 41 个雾下对象有 20 个被点亮）。必须重放一次迷雾。
+    this.updateFog();
   }
 
   // 重建对象头顶标签（兵力变化后调用）
@@ -877,10 +890,20 @@ export class WorldMap {
           onUpdate: k => {
             eh.mesh.position.lerpVectors(from, new THREE.Vector3(w.x, w.y, w.z), k);
             eh.mesh.position.y = w.y + Math.abs(Math.sin(k * Math.PI)) * 0.15;
+            // 单 mesh glb 模型：整体前后倾斜模拟马蹄节奏
+            if (eh.mesh.userData.fromGltf) {
+              eh.mesh.rotation.x = Math.sin(k * Math.PI * 4) * 0.08;
+              eh.mesh.rotation.z = Math.sin(k * Math.PI * 2) * 0.04;
+            }
           },
           onDone: () => {
+            if (eh.mesh.userData.fromGltf) {
+              eh.mesh.rotation.x = 0;
+              eh.mesh.rotation.z = 0;
+            }
             this.objects.delete(key(eh.x, eh.y));
             eh.x = st.x; eh.y = st.y;
+            eh.baseY = w.y; // 关键：待机动画以 baseY 为基准，不更新会把敌方英雄拉回出生点地形高度
             eh.mesh.userData.tile = { x: st.x, y: st.y };
             eh.label.position.set(w.x, w.y + 2.5, w.z);
             this.objects.set(key(st.x, st.y), eh);
@@ -1213,7 +1236,7 @@ export class WorldMap {
     if (this.moving || this.enemyTurn) return;
     const obj = this.objects.get(key(x, y));
     if (obj && (obj.kind === 'monster' || obj.kind === 'enemyHero' || obj.kind === 'enemyCastle')) {
-      if (this.adjacentTo(obj)) { this.events.onEncounter(obj); return; }
+      if (this.adjacentTo(obj)) { this.clearUndo(); this.events.onEncounter(obj); return; }
       const t = this.bestAdjacentTile(obj);
       if (!t) { this.events.toast('无法接近目标', 'warn'); return; }
       this.pending = obj;
@@ -1244,8 +1267,13 @@ export class WorldMap {
       steps.push(st);
     }
     if (!steps.length) { this.events.toast('移动力不足，请结束回合', 'warn'); this.pending = null; return; }
-    // 移动开始前记录撤销状态（位置 + 移动力），供 undoMove 恢复
-    this._undoState = { x: this.hero.x, y: this.hero.y, movePoints: this.hero.movePoints };
+    // 移动开始前记录完整撤销快照（位置 + 移动力 + 迷雾位图），路上 collectAt 触发的
+    // 每一项世界变更再记入 pending，供 undoMove 逆序回滚（否则撤销只退人不退资源＝无限刷）
+    this._undoState = {
+      x: this.hero.x, y: this.hero.y, movePoints: this.hero.movePoints,
+      explored: this._snapshotExplored(),
+      pending: [],
+    };
     this.moving = true;
     this.hidePath();
     this.hoverRing.visible = false;
@@ -1261,13 +1289,22 @@ export class WorldMap {
         onUpdate: k => {
           this.heroMesh.position.lerpVectors(from, new THREE.Vector3(w.x, w.y, w.z), k);
           this.heroMesh.position.y = w.y + Math.abs(Math.sin(k * Math.PI)) * 0.18;
-          // 马蹄摆动
+          // 单 mesh 模型：整体前后倾斜模拟马蹄节奏（无骨骼也能有动感）
+          if (this.heroMesh.userData.fromGltf) {
+            this.heroMesh.rotation.x = Math.sin(k * Math.PI * 4) * 0.08;   // 前后颠簸
+            this.heroMesh.rotation.z = Math.sin(k * Math.PI * 2) * 0.04;   // 左右轻晃
+          }
+          // 原语模型：马腿摆动
           const legs = this.heroMesh.userData.anim && this.heroMesh.userData.anim.legs;
           if (legs) for (let li = 0; li < legs.length; li++) legs[li].rotation.x = Math.sin(k * Math.PI * 2) * 0.5 * (li % 2 ? 1 : -1);
         },
         onDone: () => {
           const legs = this.heroMesh.userData.anim && this.heroMesh.userData.anim.legs;
           if (legs) for (const leg of legs) leg.rotation.x = 0;
+          if (this.heroMesh.userData.fromGltf) {
+            this.heroMesh.rotation.x = 0;
+            this.heroMesh.rotation.z = 0;
+          }
           this.hero.x = st.x; this.hero.y = st.y;
           this.hero.movePoints = Math.max(0, this.hero.movePoints - st.cost);
           this.updateFog();
@@ -1278,6 +1315,7 @@ export class WorldMap {
           if (guard) {
             this.moving = false;
             this.pending = null;
+            this.clearUndo(); // 战斗会改变世界状态，被拦截后不允许撤销
             this.hidePath();
             const gName = guard.data.name || UNITS[guard.data.stacks[0].type].name;
             this.events.toast(`${gName} 拦截了你的去路！`, 'warn');
@@ -1296,19 +1334,31 @@ export class WorldMap {
   collectAt(x, y) {
     const obj = this.objects.get(key(x, y));
     if (!obj) return;
-    if (obj.kind === 'pickup') { this.removeObject(obj); this.events.onPickup(obj); }
+    const undo = this._undoState;
+    if (obj.kind === 'pickup') {
+      if (undo) undo.pending.push({ kind: 'pickup', x: obj.x, y: obj.y, data: obj.data });
+      this.removeObject(obj);
+      this.events.onPickup(obj);
+    }
     else if (obj.kind === 'mine' && !obj.data.owned) {
       obj.data.owned = true;
-      // 占领后插上蓝色旗帜
+      // 占领后插上蓝色旗帜（打上 mineFlag 标记，撤销时按标记摘除）
       const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.9, 6), new THREE.MeshLambertMaterial({ color: 0x8a6b3d }));
       pole.position.set(0.6, 1.2, 0.4);
       const flag = new THREE.Mesh(new THREE.PlaneGeometry(0.36, 0.22), new THREE.MeshLambertMaterial({ color: 0x3b82f6, side: THREE.DoubleSide }));
       flag.position.set(0.78, 1.52, 0.4);
+      pole.userData.mineFlag = true;
+      flag.userData.mineFlag = true;
       obj.mesh.add(pole, flag);
       obj.mesh.userData.flag = flag;
+      if (undo) undo.pending.push({ kind: 'mine', x: obj.x, y: obj.y, data: obj.data, obj });
       this.events.onMine(obj);
     }
-    else if (obj.kind === 'artifact') { this.removeObject(obj); this.events.onArtifact(obj); }
+    else if (obj.kind === 'artifact') {
+      if (undo) undo.pending.push({ kind: 'artifact', x: obj.x, y: obj.y, data: obj.data });
+      this.removeObject(obj);
+      this.events.onArtifact(obj);
+    }
   }
 
   arrive() {
@@ -1316,6 +1366,7 @@ export class WorldMap {
     this.pending = null;
     if (p && (p.kind === 'monster' || p.kind === 'enemyHero' || p.kind === 'enemyCastle') &&
         this.objects.has(key(p.x, p.y)) && this.adjacentTo(p)) {
+      this.clearUndo(); // 进入战斗后不允许撤销
       this.events.onEncounter(p);
       return;
     }
@@ -1326,16 +1377,77 @@ export class WorldMap {
     this.events.onArrive();
   }
 
-  // 撤销上一次移动：回到移动前位置并恢复移动力（仅一次）
+  // ---------- 撤销 ----------
+  // 清除撤销快照（战斗 / 结束回合等不可逆事件后调用）
+  clearUndo() { this._undoState = null; }
+
+  // 迷雾 explored 位图快照 / 还原（撤销后不能白送已探索区域）
+  _snapshotExplored() {
+    if (!this.explored) return null;
+    const snap = new Uint8Array(MW * MH);
+    for (let x = 0; x < MW; x++) {
+      const col = this.explored[x];
+      if (!col) continue;
+      for (let y = 0; y < MH; y++) if (col[y]) snap[x * MH + y] = 1;
+    }
+    return snap;
+  }
+  _restoreExplored(snap) {
+    if (!snap || !this.explored) return;
+    for (let x = 0; x < MW; x++) {
+      const col = this.explored[x];
+      if (!col) continue;
+      for (let y = 0; y < MH; y++) col[y] = snap[x * MH + y] === 1;
+    }
+  }
+  // 摘掉矿场占领旗（按 userData.mineFlag 标记查找，mesh 被 refreshObjectMeshes 换过也不会误删）
+  _removeMineFlag(obj) {
+    const m = obj && obj.mesh;
+    if (!m || typeof m.remove !== 'function' || !Array.isArray(m.children)) return;
+    for (const c of m.children.filter(c => c.userData && c.userData.mineFlag)) {
+      m.remove(c);
+      disposeObject3D(c);
+    }
+    if (m.userData) m.userData.flag = null;
+  }
+
+  // 撤销上一次移动：回到移动前位置、恢复移动力，并逆序回滚路上拿到的一切（仅一次）
   undoMove() {
     if (!this._undoState || this.moving) return false;
-    this.hero.x = this._undoState.x;
-    this.hero.y = this._undoState.y;
-    this.hero.movePoints = this._undoState.movePoints;
-    // 把英雄网格移回原位
+    const snap = this._undoState;
+    this._undoState = null; // 先清空：回滚过程中的 addObject 不应再记账，且只能撤销一次
+    // 1) 逆序回滚 collectAt 造成的世界变更
+    const pending = snap.pending || [];
+    for (let i = pending.length - 1; i >= 0; i--) {
+      const rec = pending[i];
+      // 1a) 场景回滚（重建网格 / 摘旗）——独立 try：这里失败只是画面残留
+      try {
+        if (rec.kind === 'pickup' || rec.kind === 'artifact') {
+          // 重新放回被删除的资源堆 / 宝物（复用原 data 对象，数量与种类不变）
+          if (!this.objects.has(key(rec.x, rec.y))) this.addObject(rec.kind, rec.x, rec.y, rec.data);
+        } else if (rec.kind === 'mine') {
+          rec.data.owned = false; // 先退状态再摘旗，摘旗抛错也不会留下"已占领"
+          this._removeMineFlag(rec.obj || this.objects.get(key(rec.x, rec.y)));
+        }
+      } catch (e) {
+        console.warn('[undoMove] 场景回滚失败（继续回滚数值）', rec, e);
+      }
+      // 1b) 数值回滚（资源数量 / 矿场计数 / 宝物属性加成）——必须独立 try，
+      //     否则上面任何一处抛错都会吞掉这一步，退了人却没退资源＝刷资源漏洞复活
+      try {
+        if (typeof this.events.onUndoPickup === 'function') this.events.onUndoPickup(rec.kind, rec.data);
+      } catch (e) {
+        console.warn('[undoMove] 数值回滚失败', rec, e);
+      }
+    }
+    // 2) 回滚英雄位置与移动力
+    this.hero.x = snap.x;
+    this.hero.y = snap.y;
+    this.hero.movePoints = snap.movePoints;
     const w = this.tileWorld(this.hero.x, this.hero.y);
     this.heroMesh.position.set(w.x, w.y, w.z);
-    this._undoState = null; // 只能撤销一次
+    // 3) 回滚迷雾（explored 只增不减，不还原就等于白送视野）
+    this._restoreExplored(snap.explored);
     this.updateFog();
     this.hidePath();
     return true;
@@ -1348,10 +1460,21 @@ export class WorldMap {
       this.hoverRing.visible = false;
       return null;
     }
+    // 战争迷雾也要挡逻辑：未探索格不暴露格上对象（否则光标形状/环色能摸出黑雾下的怪物与宝物）
+    if (this.explored && this.explored[x] && !this.explored[x][y]) {
+      this.hoverRing.visible = false;
+      return null;
+    }
     const w = this.tileWorld(x, y);
     this.hoverRing.position.set(w.x, w.y + 0.12, w.z);
     this.hoverRing.visible = true;
     const obj = this.objects.get(key(x, y));
+    // 敌方英雄仅在当前视野内才暴露（与 updateFog 的可见性规则一致）
+    const hidden = obj && obj.kind === 'enemyHero' && !(this.visible && this.visible[x] && this.visible[x][y]);
+    if (hidden) {
+      this.hoverRing.material.color.set(0xffe9b0);
+      return null;
+    }
     this.hoverRing.material.color.set(obj ? (obj.kind === 'monster' ? 0xff6b5a : 0xffd76b) : 0xffe9b0);
     // 路径预览（可达且移动力足够时）
     if (!obj && !this.moving && this.passable(x, y) && !(x === this.hero.x && y === this.hero.y)) {
@@ -1410,6 +1533,10 @@ export class WorldMap {
         o.mesh.rotation.y += dt * 1.5;
       } else if (o.kind === 'monster') {
         o.mesh.position.y = o.baseY + Math.abs(Math.sin(this.time * 2.2 + o.x * 1.3)) * 0.08;
+        // 单 mesh glb 模型待机：轻微呼吸式起伏
+        if (o.mesh.userData.fromGltf) {
+          o.mesh.rotation.x = Math.sin(this.time * 1.5 + o.x) * 0.015;
+        }
         // 野怪待机动画：振翅 / 幽灵波动
         const anim = o.mesh.userData.anim;
         if (anim && anim.wings) {
@@ -1423,6 +1550,19 @@ export class WorldMap {
         }
       } else if (o.kind === 'pickup') {
         o.mesh.rotation.y += dt * 0.8;
+      } else if (o.kind === 'enemyHero') {
+        // 敌方英雄待机：轻微呼吸式起伏 + 旗帜/披风动画
+        if (!this.enemyTurn) {
+          o.mesh.position.y = o.baseY + Math.sin(this.time * 2.5 + o.x) * 0.03;
+          if (o.mesh.userData.fromGltf) {
+            o.mesh.rotation.x = Math.sin(this.time * 1.5 + o.x) * 0.015;
+          }
+        }
+        const eAnim = o.mesh.userData.anim;
+        if (eAnim) {
+          if (eAnim.flag) eAnim.flag.rotation.y = Math.sin(this.time * 3 + o.x) * 0.25;
+          if (eAnim.cape) eAnim.cape.rotation.x = 0.25 + Math.sin(this.time * 2.2 + o.x) * 0.07;
+        }
       } else if (o.kind === 'castle' || o.kind === 'enemyCastle') {
         const f = o.mesh.userData.flag;
         if (f) f.rotation.y = Math.sin(this.time * 3 + o.x) * 0.3;
@@ -1434,11 +1574,15 @@ export class WorldMap {
     }
     if (!this.moving) {
       this.heroMesh.position.y = this.tileH[this.hero.x][this.hero.y] + Math.sin(this.time * 2.5) * 0.03;
+      // 单 mesh 模型待机：轻微呼吸式起伏（模拟马匹站立时的轻微摆动）
+      if (this.heroMesh.userData.fromGltf) {
+        this.heroMesh.rotation.x = Math.sin(this.time * 1.5) * 0.015;
+      }
     }
     const hAnim = this.heroMesh.userData.anim;
     if (hAnim) {
-      hAnim.flag.rotation.y = Math.sin(this.time * 3) * 0.25;
-      hAnim.cape.rotation.x = 0.25 + Math.sin(this.time * 2.2) * 0.07;
+      if (hAnim.flag) hAnim.flag.rotation.y = Math.sin(this.time * 3) * 0.25;
+      if (hAnim.cape) hAnim.cape.rotation.x = 0.25 + Math.sin(this.time * 2.2) * 0.07;
     }
   }
 }

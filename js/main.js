@@ -104,10 +104,36 @@ composer.addPass(bloomPass);
 composer.addPass(new OutputPass());
 let bloomEnabled = true; // 按画质动态开关
 
+// ---------- 启动就绪门禁 ----------
+// boot() 是异步的（预加载 glTF 后才建世界），但 loop() 会在首帧后立刻移除 #loading，
+// 于是在 boot 完成前难度按钮就可点 → 世界被构建两次。这里在 boot 完成前禁用开始按钮，
+// 并让 onStart / onContinueSave 显式 await bootPromise，双保险。
+let bootDone = false;
+let bootPromise = null;   // 在文件末尾赋值
+let startPending = false; // 防止连点导致重复开局
+function setStartButtonsEnabled(on) {
+  const hint = on ? '' : '资源加载中，稍候…';
+  document.querySelectorAll('button[data-diff]').forEach(b => { b.disabled = !on; b.title = hint; });
+  const c = document.getElementById('btn-continue-save');
+  if (c) { c.disabled = !on; c.title = hint; }
+}
+setStartButtonsEnabled(false);
+async function beginGame(fn) {
+  if (startPending || state.mode !== 'start') return;
+  startPending = true;
+  try {
+    if (!bootDone && bootPromise) await bootPromise;
+  } catch (e) { /* boot 失败也允许开局（会走原语回退） */ }
+  try {
+    if (state.mode !== 'start') return; // await 期间已经开局了
+    fn();
+  } finally { startPending = false; }
+}
+
 // ---------- UI ----------
 const ui = new UI({
-  onStart: (diff) => { initAudio(); sfx('win'); setDifficulty(diff); startNewGame(); },
-  onContinueSave: () => { initAudio(); continueGame(); },
+  onStart: (diff) => beginGame(() => { initAudio(); sfx('win'); setDifficulty(diff); startNewGame(); }),
+  onContinueSave: () => beginGame(() => { initAudio(); continueGame(); }),
   onEndTurn: () => endTurn(),
   onWait: () => battle && battle.waitAction(),
   onDefend: () => battle && battle.defendAction(),
@@ -119,20 +145,88 @@ const ui = new UI({
   getCamera: () => camera,
 });
 
+// ---------- 拾取账本（供 undoMove 回滚 main.js 侧的资源 / 宝物属性） ----------
+// map.js 的 undoMove 会对每一件本次移动中拾取的东西回调 events.onUndoPickup(kind, data)。
+// 账本保证幂等：一次发放只能被回滚一次，重复调用（或对没发放过的东西调用）静默忽略。
+const GRANT_LOG_MAX = 32;
+const grantLog = []; // { kind, data }
+function logGrant(kind, data) {
+  grantLog.push({ kind, data });
+  if (grantLog.length > GRANT_LOG_MAX) grantLog.splice(0, grantLog.length - GRANT_LOG_MAX);
+}
+function sameGrantData(kind, a, b) {
+  if (a === b) return true;                       // map.js 直接回传 obj.data 引用时命中
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+  if (kind === 'pickup') return a.res === b.res && a.amount === b.amount;
+  if (kind === 'mine') return a.mine === b.mine;
+  if (kind === 'artifact') return a.art === b.art;
+  return false;
+}
+function takeGrant(kind, data) {
+  // 两趟：先按对象引用精确匹配（map.js 复用原 data 对象，正常都命中），
+  // 再退化到按字段匹配（存档往返 / 深拷贝场景）。都从最新一条往回找。
+  for (let pass = 0; pass < 2; pass++) {
+    for (let i = grantLog.length - 1; i >= 0; i--) {
+      const g = grantLog[i];
+      if (g.kind !== kind) continue;
+      const hit = pass === 0 ? g.data === data : sameGrantData(kind, g.data, data);
+      if (!hit) continue;
+      grantLog.splice(i, 1);
+      return g.data;   // 以发放时记录的 data 为准，避免调用方传残缺对象
+    }
+  }
+  return null;
+}
+function clearGrantLog() { grantLog.length = 0; }
+
+// 回滚一件宝物的属性加成（导出给 map.js / 调试用；幂等由 takeGrant 保证）
+function revertArtifact(art) {
+  const h = state.hero;
+  if (art === 'sword') h.atk = Math.max(1, h.atk - 1);
+  else if (art === 'shield') h.def = Math.max(1, h.def - 1);
+  else if (art === 'boots') {
+    world.hero.moveMax = Math.max(1, world.hero.moveMax - 3);
+    // 不直接减 movePoints：undoMove 已从快照恢复它，这里只做上限收敛
+    world.hero.movePoints = Math.min(world.hero.movePoints, world.hero.moveMax);
+  } else if (art === 'book') {
+    h.mpMax = Math.max(1, h.mpMax - 4);
+    h.mp = Math.min(h.mp, h.mpMax);
+  }
+}
+
 // ---------- 地图事件 ----------
 const world = new WorldMap(mapScene, {
   toast: (m, c) => ui.toast(m, c),
+  // undoMove 回滚钩子：kind ∈ 'pickup' | 'mine' | 'artifact'，data 为对应 obj.data
+  onUndoPickup(kind, data) {
+    const d = takeGrant(kind, data);
+    if (!d) return false; // 没发放过 / 已回滚过 —— 幂等空转
+    if (kind === 'pickup') {
+      const amt = Number(d.amount) || 0;
+      if (d.res === 'gold' || d.res === 'chest') state.res.gold = Math.max(0, state.res.gold - amt);
+      else if (d.res === 'wood') state.res.wood = Math.max(0, state.res.wood - amt);
+      else state.res.ore = Math.max(0, state.res.ore - amt);
+    } else if (kind === 'mine') {
+      if (state.mines[d.mine] > 0) state.mines[d.mine]--;
+    } else if (kind === 'artifact') {
+      revertArtifact(d.art);
+    }
+    refreshUI();
+    return true;
+  },
   onPickup(obj) {
     const d = obj.data;
     if (d.res === 'gold' || d.res === 'chest') { state.res.gold += d.amount; ui.toast(`获得金币 +${d.amount}`, 'good'); }
     else if (d.res === 'wood') { state.res.wood += d.amount; ui.toast(`获得木材 +${d.amount}`, 'good'); }
     else { state.res.ore += d.amount; ui.toast(`获得矿石 +${d.amount}`, 'good'); }
+    logGrant('pickup', d);
     sfx('pickup');
     refreshUI();
   },
   onMine(obj) {
     const m = MINES[obj.data.mine];
     state.mines[obj.data.mine]++;
+    logGrant('mine', obj.data);
     const inc = Object.entries(m.income).map(([k, v]) => `${{ gold: '金币', wood: '木材', ore: '矿石' }[k]}+${v}/天`).join(' ');
     ui.toast(`占领了${m.name}（${inc}）`, 'good');
     sfx('pickup');
@@ -149,6 +243,7 @@ const world = new WorldMap(mapScene, {
     else if (obj.data.art === 'shield') h.def++;
     else if (obj.data.art === 'boots') { world.hero.moveMax += 3; world.hero.movePoints += 3; }
     else if (obj.data.art === 'book') { h.mpMax += 4; h.mp += 4; }
+    logGrant('artifact', obj.data);
     ui.toast(`拾取宝物【${a.name}】：${a.desc}`, 'good');
     sfx('level');
     refreshUI();
@@ -188,6 +283,45 @@ function saveGame() {
     }));
   } catch (e) { /* 存储不可用时忽略 */ }
 }
+// 存档结构校验：返回 null 表示合法，否则返回中文原因（用于 toast）
+// 只放行真正能被 applySavedState + world.build 消费的结构，避免导入畸形数据后
+// 静默启动失败并顺带把原存档冲掉。
+function validateSave(data) {
+  const isObj = v => v && typeof v === 'object' && !Array.isArray(v);
+  if (!isObj(data)) return '顶层不是存档对象';
+  const st = data.state, w = data.world;
+  if (!isObj(st)) return '缺少 state 字段';
+  if (!isObj(w)) return '缺少 world 字段';
+  // --- state ---
+  if (!Number.isFinite(st.day) || st.day < 1) return 'state.day 非法';
+  if (!isObj(st.res) || ['gold', 'wood', 'ore'].some(k => !Number.isFinite(st.res[k]))) return 'state.res 非法';
+  if (!isObj(st.mines) || ['sawmill', 'ore', 'gold'].some(k => !Number.isFinite(st.mines[k]))) return 'state.mines 非法';
+  if (!isObj(st.hero)) return '缺少 state.hero';
+  const h = st.hero;
+  if (['level', 'xp', 'atk', 'def', 'mp', 'mpMax'].some(k => !Number.isFinite(h[k]))) return 'state.hero 属性非法';
+  if (!Array.isArray(h.army)) return 'state.hero.army 不是数组';
+  if (h.army.some(a => !isObj(a) || typeof a.type !== 'string' || !UNITS[a.type] || !Number.isFinite(a.count)))
+    return 'state.hero.army 含非法部队';
+  // --- world ---
+  if (!Array.isArray(w.types) || w.types.length !== MAP.H) return `world.types 必须是 ${MAP.H} 行`;
+  if (w.types.some(r => typeof r !== 'string' || r.length !== MAP.W)) return `world.types 每行须为 ${MAP.W} 字符`;
+  if (!Array.isArray(w.objects)) return 'world.objects 不是数组';
+  if (w.objects.some(o => !isObj(o) || typeof o.kind !== 'string' ||
+      !Number.isFinite(o.x) || !Number.isFinite(o.y) || !isObj(o.data)))
+    return 'world.objects 含非法对象';
+  if (!isObj(w.hero) || !Number.isFinite(w.hero.x) || !Number.isFinite(w.hero.y) ||
+      !Number.isFinite(w.hero.movePoints) || !Number.isFinite(w.hero.moveMax))
+    return 'world.hero 非法';
+  if (w.hero.x < 0 || w.hero.x >= MAP.W || w.hero.y < 0 || w.hero.y >= MAP.H) return 'world.hero 坐标越界';
+  for (const k of ['startPos', 'castlePos', 'bossPos']) {
+    if (!isObj(w[k]) || !Number.isFinite(w[k].x) || !Number.isFinite(w[k].y)) return `world.${k} 非法`;
+  }
+  if (w.paths != null && !Array.isArray(w.paths)) return 'world.paths 非法';
+  if (w.bookmarks != null && !Array.isArray(w.bookmarks)) return 'world.bookmarks 非法';
+  if (w.explored != null && (!Array.isArray(w.explored) || w.explored.length !== MAP.W)) return 'world.explored 非法';
+  return null;
+}
+
 function applySavedState(s) {
   if (s.diff) setDifficulty(s.diff);
   state.day = s.day; state.res = s.res; state.mines = s.mines;
@@ -241,6 +375,7 @@ function resetState() {
   ];
   state.battlesWon = 0; state.totalKills = 0; state.barracksUpgraded = false;
   state.won = false; state.over = false;
+  clearGrantLog();
 }
 
 function enterMap() {
@@ -301,6 +436,7 @@ function endTurn() {
   world.hero.movePoints = world.hero.moveMax;
   // 结束回合后清除撤销状态
   world._undoState = null;
+  clearGrantLog();
   ui.setUndoAvailable(false);
   // 收入
   let gold = DIFF.castleIncome + state.mines.gold * MINES.gold.income.gold + (state.hero.skills.estates || 0) * 250;
@@ -339,6 +475,8 @@ function undoMove() {
   if (state.mode !== 'map' || world.moving) return;
   const ok = world.undoMove();
   if (ok) {
+    // map.js 已通过 onUndoPickup 回滚本次移动的资源 / 宝物；清空账本，避免跨次误回滚
+    clearGrantLog();
     sfx('click');
     refreshUI();
     ui.toast('已撤销移动', 'good');
@@ -390,22 +528,25 @@ function openSettings() {
       applyQuality();
     },
     onExport: () => {
-      // 导出当前存档为 JSON 字符串
+      // 导出前先落盘当前进度，避免导出的是上一次自动存档的旧快照
+      saveGame();
       const s = localStorage.getItem(SAVE_KEY);
       return s || null;
     },
     onImport: (text) => {
-      // 导入存档：校验格式后写入 localStorage，刷新生效
-      try {
-        const data = JSON.parse(text);
-        if (!data || typeof data !== 'object' || !data.state || !data.world) {
-          return false;
-        }
-        localStorage.setItem(SAVE_KEY, text);
-        return true;
-      } catch (e) {
+      // 导入存档：结构校验通过才写入 localStorage，刷新生效
+      let data;
+      try { data = JSON.parse(text); } catch (e) {
+        ui.toast('导入失败：不是合法的 JSON 存档', 'warn');
         return false;
       }
+      const bad = validateSave(data);
+      if (bad) {
+        ui.toast(`导入失败：${bad}`, 'warn');
+        return false;
+      }
+      localStorage.setItem(SAVE_KEY, text);
+      return true;
     },
   });
 }
@@ -432,6 +573,7 @@ function startBattle(encounterObj) {
   world.pending = null;
   // 进入战斗后清除撤销状态（战斗会改变世界状态，不允许撤销）
   world._undoState = null;
+  clearGrantLog();
   ui.setUndoAvailable(false);
   battleScene = new THREE.Scene();
   battleScene.environment = envMap; // 战场也用环境贴图，金属反射一致
@@ -582,18 +724,22 @@ function onBattleEnd(result, surviving, encounterObj, kills) {
 const RECORD_KEY = 'homm3d_records';
 function loadRecords() { try { return JSON.parse(localStorage.getItem(RECORD_KEY) || '[]'); } catch (e) { return []; } }
 function saveRecord(result) {
+  // 「最近 10 局」：新记录插到最前，超出裁掉最旧的。
+  // （旧实现按 胜利优先+天数升序 排序后 slice(0,10)，攒够 10 胜后新记录会被直接丢弃。）
   const recs = loadRecords();
-  recs.push({
+  recs.unshift({
     result, diff: getDifficultyKey(), day: state.day, battlesWon: state.battlesWon,
     kills: state.totalKills, level: state.hero.level, atk: state.hero.atk, def: state.hero.def,
     date: new Date().toLocaleDateString('zh-CN'),
+    ts: Date.now(),
   });
-  recs.sort((a, b) => (b.result === 'win' ? 1 : 0) - (a.result === 'win' ? 1 : 0) || a.day - b.day);
-  localStorage.setItem(RECORD_KEY, JSON.stringify(recs.slice(0, 10)));
+  try { localStorage.setItem(RECORD_KEY, JSON.stringify(recs.slice(0, 10))); } catch (e) { /* 存储不可用时忽略 */ }
 }
+// 最近 10 局里通关天数最少的一局（列表不再预排序，这里显式求最优）
 function bestRecord() {
-  const recs = loadRecords();
-  return recs.find(r => r.result === 'win') || null;
+  return loadRecords()
+    .filter(r => r && r.result === 'win' && Number.isFinite(r.day))
+    .sort((a, b) => a.day - b.day)[0] || null;
 }
 
 function refreshUI() {
@@ -608,13 +754,39 @@ let downPos = null;
 let lastMoveTs = 0;
 let longPressTimer = null;   // 长按书签定时器
 let longPressFired = false;  // 长按是否已触发（避免 pointerup 再执行点击移动）
+let activePointerId = null;  // 只跟踪主指针，第二根手指（捏合/旋转）不参与点击/长按判定
 
 function setPointer(e) {
   pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
   pointer.y = -(e.clientY / window.innerHeight) * 2 + 1;
 }
 
+// three r160 的 Raycaster 不检查 object.visible，雾下对象照样能被命中。
+// 所有对地图对象的射线检测都必须先按可见性过滤。
+function visibleObjMeshes() {
+  return [...world.objects.values()].map(o => o.mesh).filter(m => m && m.visible);
+}
+
+// 取消当前指针交互（多指、pointercancel、失焦时调用）
+function cancelPointerTracking() {
+  if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+  longPressFired = false;
+  downPos = null;
+  activePointerId = null;
+}
+
 renderer.domElement.addEventListener('pointerdown', e => {
+  // 关键：无条件先清掉上一个未完成的长按定时器，否则多指按下会泄漏定时器，
+  // 捏合缩放时凭空生成书签。
+  if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+  // 第二根手指按下：进入多指手势，整段交互都不算点击
+  if (activePointerId !== null && activePointerId !== e.pointerId) {
+    downPos = null;
+    longPressFired = false;
+    return;
+  }
+  if (e.isPrimary === false) { downPos = null; return; }
+  activePointerId = e.pointerId;
   downPos = { x: e.clientX, y: e.clientY, b: e.button };
   if (e.button === 2 && state.mode === 'map') cameraFree = true; // 右键拖拽进入自由观察
   // 点击画布抢回焦点，保证 WASD 可用
@@ -627,7 +799,7 @@ renderer.domElement.addEventListener('pointerdown', e => {
     setPointer(e);
     raycaster.setFromCamera(pointer, camera);
     let tile = null;
-    const objMeshes = [...world.objects.values()].map(o => o.mesh);
+    const objMeshes = visibleObjMeshes();
     let hits = raycaster.intersectObjects(objMeshes, true);
     if (hits.length) {
       let g = hits[0].object;
@@ -651,11 +823,18 @@ renderer.domElement.addEventListener('pointerdown', e => {
   }
 });
 renderer.domElement.addEventListener('pointerup', e => {
+  // 非主指针抬起（捏合的第二根手指）：只清理定时器，不改 longPressFired、不判定点击。
+  // 旧实现在这里把 longPressFired 清成 false，导致主指针那次抬手被误判为普通点击。
+  if (activePointerId !== null && e.pointerId !== activePointerId) {
+    if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+    return;
+  }
+  activePointerId = null;
   // 取消长按定时器；若长按已触发书签则跳过点击移动
   if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
   const wasLongPress = longPressFired;
   longPressFired = false;
-  if (wasLongPress) return;
+  if (wasLongPress) { downPos = null; return; }
   if (!downPos || downPos.b !== 0) return;
   const moved = Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y);
   downPos = null;
@@ -664,8 +843,8 @@ renderer.domElement.addEventListener('pointerup', e => {
   raycaster.setFromCamera(pointer, camera);
   if (state.mode === 'map' && !world.moving && !world.enemyTurn && !state.over) {
     cameraFree = false; // 点击大地图恢复跟随英雄
-    // 先测对象，再测地形
-    const objMeshes = [...world.objects.values()].map(o => o.mesh);
+    // 先测对象（过滤雾下不可见对象），再测地形
+    const objMeshes = visibleObjMeshes();
     let hits = raycaster.intersectObjects(objMeshes, true);
     if (hits.length) {
       let g = hits[0].object;
@@ -754,6 +933,12 @@ renderer.domElement.addEventListener('pointermove', e => {
   }
 });
 
+// 指针被系统取消（多指手势接管、滚动接管、触摸中断）：必须清定时器，
+// 否则 500ms 后会在一个用户早已放弃的地块上凭空标出书签。
+// 注意：不监听 lostpointercapture —— OrbitControls 每次正常抬手都会释放指针捕获，
+// 那会在我们的 pointerup 之前把 downPos 清掉，导致所有点击失效。
+renderer.domElement.addEventListener('pointercancel', cancelPointerTracking);
+
 renderer.domElement.addEventListener('contextmenu', e => {
   e.preventDefault();
   if (battle && battle.activeSpell) battle.cancelSpell();
@@ -794,7 +979,10 @@ document.addEventListener('keyup', e => {
   const mk = mapKey(e);
   if (mk) keys[mk] = false;
 }, true);
-window.addEventListener('blur', () => { keys.KeyW = keys.KeyA = keys.KeyS = keys.KeyD = false; });
+window.addEventListener('blur', () => {
+  keys.KeyW = keys.KeyA = keys.KeyS = keys.KeyD = false;
+  cancelPointerTracking(); // 失焦时不会再收到 pointerup，必须主动清掉长按定时器
+});
 
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -878,7 +1066,10 @@ loop();
 
 // ---------- 调试句柄 ----------
 window.__game = { state, world, ui, getBattle: () => battle, startBattle, endTurn, saveGame, readSave, maybeSpawnEnemy,
-  getCamTarget: () => controls.target, getCamPos: () => camera.position };
+  getCamTarget: () => controls.target, getCamPos: () => camera.position,
+  // 联调/回归用
+  validateSave, revertArtifact, loadRecords, bestRecord,
+  isBootDone: () => bootDone, whenBootReady: () => bootPromise };
 
 // ---------- 启动：预加载 glTF → 构建世界 ----------
 controls.enabled = false;
@@ -911,16 +1102,32 @@ async function boot() {
   }).catch(e => console.warn('[boot] 后台资产加载异常', e));
 
   const bootSave = SMOKE ? null : readSave();
-  if (bootSave) {
-    applySavedState(bootSave.state);
-    world.build(bootSave.world);
-    world.fromSave = true;
-    document.getElementById('btn-continue-save').classList.remove('hidden');
-  } else {
-    world.build(null);
-    world.fromSave = false;
+  // 【难度恢复】saveGame 把 diff 写在存档顶层，而 applySavedState 读的是 s.diff（state 内层，
+  // 恒 undefined）。必须在 applySavedState / world.build 之前把难度设回去，否则读档后
+  // 整局都跑在 normal 数值上，且世界会按 normal 烘焙。无 diff 的旧存档回落 normal。
+  if (bootSave) setDifficulty(bootSave.diff || (bootSave.state && bootSave.state.diff) || 'normal');
+
+  // 建世界互斥：boot 是异步的，理论上世界可能已被 startNewGame 建好，重复 build 会造成
+  // 对象翻倍（实测 79 vs 基线 42）。
+  if (!world.built) {
+    if (bootSave) {
+      applySavedState(bootSave.state);
+      world.build(bootSave.world);
+      world.fromSave = true;
+    } else {
+      world.build(null);
+      world.fromSave = false;
+    }
+  }
+  if (bootSave && state.mode === 'start') {
+    const bc = document.getElementById('btn-continue-save');
+    if (bc) bc.classList.remove('hidden');
   }
   applyQuality();
+
+  // 世界就绪：放开开始按钮
+  bootDone = true;
+  setStartButtonsEnabled(true);
 
   // 冒烟测试钩子
   if (SMOKE) {
@@ -937,8 +1144,11 @@ async function boot() {
   }
 }
 
-boot().catch((e) => {
+bootPromise = boot().catch((e) => {
   console.error(e);
   const tip = document.querySelector('#loading .load-tip');
   if (tip) tip.textContent = '启动失败，请刷新重试';
+  // 即使 boot 出错也要放开按钮，否则开始界面彻底卡死
+  bootDone = true;
+  setStartButtonsEnabled(true);
 });
