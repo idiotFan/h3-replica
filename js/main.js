@@ -396,8 +396,10 @@ function enterMap() {
   renderer.domElement.tabIndex = 0;
   renderer.domElement.style.outline = 'none';
   renderer.domElement.focus({ preventScroll: true });
-  startBgm();
+  // BGM 现在是 4.6MB 的完整曲目，若与首屏 glb 同时开抢带宽会明显拖慢进场。
+  // 音效很小（244KB）可以立刻预热；BGM 延后 2 秒，让 glb 先走完。
   preloadSfx();                        // 预热音效文件，避免首次触发时才现拉造成延迟
+  setTimeout(() => { if (state.mode === 'map') startBgm(); }, 2000);
   guideStep();
 }
 
