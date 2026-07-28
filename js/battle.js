@@ -288,6 +288,7 @@ export class Battle {
       this.ui.toast(`第 ${this.round} 回合`, 'round');
       this.ui.battleLog(`—— 第 ${this.round} 回合 ——`, 'round');
       this.ui.turnBanner(`第 ${this.round} 回合`, 'round');
+      sfx('turn');                      // 新回合提示音
     } else {
       this.ui.turnBanner('战斗开始！', 'start');
     }
@@ -653,6 +654,7 @@ export class Battle {
   }
 
   applyDamage(def, dmg) {
+    if (def.side === 0) sfx('hurt');    // 我方挨打：额外的闷响，强化「被打疼了」的反馈
     const pool = (def.count - 1) * def.t.hp + def.topHP - dmg;
     const oldCount = def.count;
     if (pool <= 0) {
@@ -692,6 +694,7 @@ export class Battle {
 
   killStack(st) {
     const mesh = st.mesh;
+    sfx('death');                       // 阵亡：低沉下坠音
     this.ui.removeStackLabel(st);
     this.particles.burst(mesh.position.x, 1.0, mesh.position.z,
       { color: 0x9a9a9a, n: 16, speed: 1.2, up: 2.6, life: 1.0 });
@@ -747,6 +750,7 @@ export class Battle {
 
     if (shoot) {
       att.shotsLeft--;
+      sfx('arrow');                     // 箭矢破空
       // 箭矢
       const aw = this.hexWorld(att.col, att.row);
       const arrow = new THREE.Mesh(new THREE.SphereGeometry(0.09, 8, 6),
@@ -798,6 +802,7 @@ export class Battle {
   defendAction() {
     if (this.busy || !this.active || this.active.side !== 0) return;
     this.active.defending = true;
+    sfx('block');                       // 举盾格挡
     this.ui.floaterAt(this.active, '防御', 'buff');
     this.ui.battleLog(`${this.active.t.name} 防御（防御力 +20%）`, 'round');
     sfx('click');
@@ -840,6 +845,7 @@ export class Battle {
     });
   }
   explodeEffect(target) {
+    sfx('fireball');                    // 火球轰鸣
     const w = this.hexWorld(target.col, target.row);
     const ball = new THREE.Mesh(
       new THREE.SphereGeometry(0.5, 12, 10),
