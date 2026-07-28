@@ -85,11 +85,19 @@ export class Battle {
     const sky = new THREE.Mesh(new THREE.SphereGeometry(120, 20, 10), makeSkyMaterial(th.skyTop, th.skyHor));
     sky.frustumCulled = false;
     sc.add(sky);
+    // 云必须放在相机活动球【之外】：相机绕 (0,0,0.5) 公转、距离上限 32
+    // （见 main.js setCameraBattle）。原先撒在 x/z∈[-35,35]、y∈[10,16] 的方盒里，
+    // 与相机活动范围完全重叠——实测近半数云在某些机位会挡在镜头与战场之间。
+    // 改成环形分布：水平半径 45~70（远超 maxDistance 32）、高度 22~34。
     for (let i = 0; i < 5; i++) {
       const cloud = makeCloudSprite();
-      const s2 = rand(6, 11);
+      const s2 = rand(9, 15);                       // 放远了，等比放大保持观感
       cloud.scale.set(s2, s2 * 0.5, 1);
-      cloud.position.set(rand(-35, 35), rand(10, 16), rand(-35, 35));
+      const ang = (i / 5) * Math.PI * 2 + rand(-0.4, 0.4);
+      const rad = rand(45, 70);
+      cloud.position.set(Math.cos(ang) * rad, rand(22, 34), Math.sin(ang) * rad);
+      cloud.renderOrder = -1;                       // 双保险：永远先于战场内容绘制
+      if (cloud.material) cloud.material.depthWrite = false;
       sc.add(cloud);
     }
     sc.add(new THREE.HemisphereLight(0xd8ecff, 0x2f4a2a, 1.0));
