@@ -681,9 +681,6 @@ prompt 关键词：`medieval, fantasy, orchestral, instrumental, loopable, game 
 
 | 优先级 | 问题 | 现状 / 修复方向 |
 |--------|------|----------------|
-| P1 | **SW 的 CDN 分支可能永不 settle** | `sw.js:94-104` 的 stale-while-revalidate：`cached` 为空且网络既不 resolve 也不 reject 时，`e.respondWith()` 的 Promise 会挂死。实测后果是新 SW 装好后 `waiting → active` 的交接被卡十几秒。修复方向：`Promise.race` 加超时兜底，或 `cached` 为空时直接放行不 `respondWith`。详见 §4.7 末尾 |
-| P1 | **BGM 关服务器后仍播放** | `art/audio/bgm_map.mp3` 已被浏览器完整缓冲，关服务器不停止。修复方向：`pagehide`/`visibilitychange` 触发 `stopBgm()`（当前 `main.js:335` 只挂了 `beforeunload → saveGame()`，没挂 `stopBgm`） |
-| **P1** | **BGM 音质差（未完成）** | 线上仍是 `small` 模型 / 单声道 / **67kbps**。升级脚本已就绪（stereo-medium + 192kbps + 无缝循环 + 多候选）、3.5GB 模型已缓存、MPS 加速已验证，但 Mac 上 **15 分钟才出 45 秒**，跑三个候选要 45 分钟，已叫停。**建议换 RTX 3060 机器（WSL2）重跑，顺带上 `large`**。完整方案、实测速率、避坑记录见 §7.2 |
 | P2 | **战斗中偶发怪物模型消失** | 用户报告「打斗过程中某个怪物的模型就不见了」。**已尝试自动化复现但未捕获**：插桩跑了两场完整战斗（含近战/反击/死亡），每帧对每个存活单位检查 7 项不变量（脱离场景 / `visible=false` / 缩放≈0 / 无 mesh / 材质透明度<0.08 / 位置偏离所属六边形>4.5 / 沉入地下），**0 次异常**。静态也已排除：无代码把战场单位设为不可见、单位无 frustumCulled 问题、队伍环几何是每单位新建（不受死亡单位 dispose 连累）、共享贴图/几何的 `shared` 标记确实生效。**下次排查需要更具体的复现条件**：是否为刚阵亡的单位（死亡动画是设计如此）、头顶数字标签是否还在（在=渲染层问题，不在=逻辑层）、是否特定兵种（幽灵本身就是半透明设计）。探针脚本见 scratchpad 的 `ghost2.mjs`，可复用 |
 | P2 | **骨骼动画缺失** | 22 个 glb 全部无 armature（Meshy 版是单 mesh，旧 Blender 版是 bmesh 原语）。真骨骼动画需重制 **17 个角色模型**（15 兵种 + 2 英雄；建筑不需要），是纯美术工程、成本高。当前程序化动画（颠簸/晃动/呼吸，见 §六）观感尚可，**因此从 P0 降级为 P2**——它不影响可玩性，也不影响线上稳定性，长期挂在 P0 会挤占真正紧急项的注意力 |
 | P3 | **多英雄** | 仅 1 个玩家英雄，H3 支持多英雄分头行动 |
@@ -691,13 +688,18 @@ prompt 关键词：`medieval, fantasy, orchestral, instrumental, loopable, game 
 | P3 | **法术等级** | 所有法术从开始可用，应绑定魔法塔等级 |
 | P3 | **战斗 AI** | 当前只射最近/走最近，缺优先击杀低血/利用障碍 |
 | P3 | **LOD 分级** | 大地图单位用 LOD1，战场用 LOD0（ROI 低，暂缓） |
-| P3 | **音效丰富化** | BGM 已是 MusicGen mp3；音效仍是 18 种 WebAudio 程序化合成，可换真实音效文件 |
-| P3 | **factory.js:247 注释与代码相反** | 行尾注释写「外部 scale 应作用到 root 而非 wrapper」，实际正确做法是作用到 wrapper（见 §六 缩放约定）。只是注释错，代码是对的 |
 
 ### 8.2 本轮已解决（详见 `FIXES-2026-07-25.md`）
 
 | 原优先级 | 问题 | 结论 |
 |---------|------|------|
+| P1 | **朝向：行进方向与模型头朝向不符** | **已修**（2026-07-28）。根因不是模型——lookAt() 之后动画对 rotation.x/.z 单独赋值，打碎了朝北方向的退化欧拉表示。改为倾斜写到 factory 保证存在的 animNode 子节点。八方向实测误差全 0，回归测试 `tests/homm_e2e7.mjs` 19 项 |
+| P1 | **BGM 每循环一圈卡顿** | **已修**。mp3 帧补白导致 `<audio loop>` 每圈插 36ms 静音。改用 Web Audio 的 AudioBufferSourceNode.loop（采样级精确），与容器格式无关，仍用 mp3 |
+| P1 | **BGM 音质差** | **已解决**。换成 Kevin MacLeod《The Britons》（FreePD 公共领域），45s→304s、32kHz→44.1kHz。绕过的弯路：AudioGen 只有 medium 一个公开版本，且固定 16kHz 输出，模型再大也救不了高频 |
+| P2 | **音效质量差 / 8 个音效从未触发** | **已解决**。补接 death/arrow/fireball/block/turn/hurt 六处调用点；音效换 Kenney CC0 素材，16kHz→44.1kHz，体积反而更小 |
+| P2 | **战场云遮挡视野** | **已修**。云原本撒在与相机活动球完全重叠的方盒里（实测 48.3% 机位会挡）。改环形远景分布（半径 45-70、高度 22-34），实测遮挡率 0% |
+| P1 | **SW 的 CDN 分支可能永不 settle** | **已修**（2026-07-28）。无缓存时 `.catch(() => cached)` 会 resolve 成 undefined 导致 respondWith 失败；网络不响应也不 reject 时永久挂起。加 8 秒超时兜底 + 保证任何分支都返回真实 Response（兜底 504） |
+| P1 | **BGM 关服务器后仍播放** | **已修**。挂 `pagehide`（比 beforeunload 可靠，覆盖移动端/bfcache）与 `visibilitychange`：切后台自动停、切回来恢复 |
 | P0 | **老用户拿不到更新**（SW 永不轮换） | **已修**。两个根因：① 缺主动 `reg.update()`；② 注册整个塞在 `load` 事件里，被第三方 CDN 卡住就永不执行。均已修复并**动态实测**跑通 3 秒轮换。机制见 §4.7 |
 | P0 | **资产体积 21MB → 目标 ≤8MB** | **已解决，但需要重新定性**。真实上线体积一直是 **3.69MB**——那 17.8MB 全是 `*.bak/.bak2` 备份废料，被 `deploy.sh` 的 `--exclude '*.bak*'` + 服务端 `find -delete` 双重拦下，**从未部署上线过**。已把备份搬到 `art/_src/_export_bak/`，`art/export` 现在如实显示 3.7MB。**这是本地工作区不整洁，不是线上性能缺陷**，别和上面那条 SW 缺陷放在同一优先级 |
 | P1 | **怪物 scale 与 yOffset 冲突** | **已修**，但当时的结论方向是反的：正确做法是缩放 **wrapper**（补偿量随之缩放，底部始终贴合 y=0），不是缩放 `userData.root`。见 §六 缩放约定 |

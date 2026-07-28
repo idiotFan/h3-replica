@@ -333,6 +333,15 @@ function applySavedState(s) {
   state.barracksUpgraded = !!s.barracksUpgraded;
 }
 window.addEventListener('beforeunload', () => saveGame());
+// pagehide 比 beforeunload 可靠（移动端 / bfcache 场景 beforeunload 常不触发），
+// 两个都挂：存档 + 停掉音频。BGM 一旦被浏览器完整缓冲，光关服务器是停不下来的，
+// 必须显式 stop，否则切走标签页/关页面后音乐还在响。
+window.addEventListener('pagehide', () => { saveGame(); stopBgm(); });
+// 切到后台就静音，切回来再恢复（仅当仍在地图模式且未手动静音）
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') stopBgm();
+  else if (!state.muted && state.mode === 'map') startBgm();
+});
 
 // ---------- 相机模式 ----------
 function setCameraMap(snap = false) {

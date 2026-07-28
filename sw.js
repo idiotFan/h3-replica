@@ -12,6 +12,7 @@
 const VERSION = '__BUILD_VERSION__';
 const CACHE = 'homm3d-' + VERSION;
 const CACHE_PREFIX = 'homm3d-';
+const CDN_TIMEOUT_MS = 8000;   // 无缓存时等待 CDN 的上限，超时后兜底避免请求永久挂起
 const CDN_HOSTS = ['cdn.jsdelivr.net', 'fonts.loli.net', 'gstatic.loli.net'];
 
 // 预缓存的应用外壳（启动必需的本地文件）
@@ -91,14 +92,41 @@ self.addEventListener('fetch', (e) => {
   const isLocal = url.origin === self.location.origin;
 
   // CDN 资源：stale-while-revalidate
+  //
+  // ⚠ 两个必须防的坑（旧实现都中招）：
+  //  1. cached 为空时返回 fetchPromise，而它的 .catch(() => cached) 在 cached
+  //     是 undefined 时会 resolve 成 undefined —— respondWith(undefined) 会让
+  //     整个请求失败（three.js / 字体拉不到，页面直接废）。必须回退成真实 Response。
+  //  2. 网络既不 resolve 也不 reject（弱网、CDN 黑洞）时 respondWith 永远挂起，
+  //     页面一直转圈。必须有超时兜底。
   if (isCDN) {
     e.respondWith((async () => {
       const cached = await caches.match(req);
-      const fetchPromise = fetch(req).then(res => {
+      const net = fetch(req).then(res => {
         if (res && res.ok) e.waitUntil(safePut(req, res.clone()));
         return res;
-      }).catch(() => cached);
-      return cached || fetchPromise;
+      });
+      if (cached) {
+        // 有缓存：立刻返回，后台静默刷新（失败也无所谓）
+        e.waitUntil(net.catch(() => {}));
+        return cached;
+      }
+      // 无缓存：必须等网络，但加超时兜底，且保证任何分支都返回真实 Response
+      try {
+        const res = await Promise.race([
+          net,
+          new Promise((_, rej) => setTimeout(() => rej(new Error('CDN timeout')), CDN_TIMEOUT_MS)),
+        ]);
+        if (res) return res;
+        throw new Error('empty response');
+      } catch (err) {
+        // 超时后再给网络一次机会（说不定只是慢），仍失败才返回 504
+        try {
+          const late = await net;
+          if (late) return late;
+        } catch (e2) { /* 落到下面的 504 */ }
+        return new Response('', { status: 504, statusText: 'CDN unavailable' });
+      }
     })());
     return;
   }
