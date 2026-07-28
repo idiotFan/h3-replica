@@ -230,15 +230,26 @@ export function sfx(kind) {
   }
 }
 
-// ---------- 背景音乐（MusicGen 生成的 mp3 循环播放） ----------
-let bgmAudio = null, bgmPlaying = false, bgmFadeRaf = null;
-// bgmGen：每次 startBgm/stopBgm 递增的世代号。淡入/淡出回调里比对世代号，
+// ---------- 背景音乐（Web Audio 无缝循环） ----------
+//
+// ⚠ 为什么不用 `<audio loop>`：mp3 是分帧格式，编码器会在末尾补白到整帧。
+// 即使文件带 Xing/Info 头声明了精确采样数，也有播放器忽略它，于是每循环一圈
+// 多插约 36ms 静音——表现就是「每 45 秒咔一下」，而原因在播放侧不在音源。
+// Web Audio 的 decodeAudioData 会遵守 Xing 头解出精确 PCM，
+// AudioBufferSourceNode.loop 则是采样级精确循环，从根上消除接缝。
+// 好处是与容器格式无关：仍可继续用 mp3（兼容性最好），不必换 ogg。
+let bgmBuffer = null;                 // 解码后的 AudioBuffer（只解一次）
+let bgmSrcNode = null, bgmGainNode = null;
+let bgmPlaying = false, bgmLoading = null;
+// bgmGen：每次 startBgm/stopBgm 递增的世代号。异步解码与淡入淡出回调里比对世代号，
 // 不一致说明期间已被后续的 start/stop 取代，直接放弃——否则 400ms 内快速切两次静音，
-// 上一次的淡出回调会把刚启动的 BGM 直接 pause 掉。
+// 上一次的淡出回调会把刚启动的 BGM 直接停掉。
 let bgmGen = 0;
 let bgmGestureHooked = false;         // 是否已挂上"下次用户手势重试播放"的一次性监听
 const BGM_SRC = 'art/audio/bgm_map.mp3';
-const BGM_VOL = 0.35; // 背景音乐音量（较低，不抢游戏音效）
+const BGM_VOL = 0.35;                 // 背景音乐音量（较低，不抢游戏音效）
+const BGM_FADE_IN = 1.5;              // 淡入秒数
+const BGM_FADE_OUT = 0.4;             // 淡出秒数
 
 // 自动播放被浏览器拦截时：解锁 bgmPlaying，并在下一次用户手势时重试一次
 function hookBgmGestureRetry() {
@@ -257,60 +268,123 @@ function hookBgmGestureRetry() {
   window.addEventListener('touchend', retry, opts);
 }
 
+/** 取回并解码 BGM（只做一次，之后复用同一个 AudioBuffer） */
+function loadBgmBuffer() {
+  if (bgmBuffer) return Promise.resolve(bgmBuffer);
+  if (bgmLoading) return bgmLoading;
+  bgmLoading = fetch(BGM_SRC)
+    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.arrayBuffer(); })
+    // decodeAudioData 的 Promise 形式在旧 Safari 上不可用，回调形式两边都吃
+    .then(ab => new Promise((res, rej) => {
+      const ret = AC.decodeAudioData(ab, res, rej);
+      if (ret && typeof ret.then === 'function') ret.then(res, rej);
+    }))
+    .then(buf => { bgmBuffer = buf; bgmLoading = null; return buf; })
+    .catch(err => { bgmLoading = null; console.warn('[bgm] 加载/解码失败:', err && err.message); return null; });
+  return bgmLoading;
+}
+
+/** 抹平循环接缝的波形跳变。
+ *
+ *  Web Audio 的 loop 已经是采样级精确（mp3 帧补白问题由 decodeAudioData 解决），
+ *  但音频**内容本身**的首尾未必连续：末采样与首采样之间若有台阶，每圈会听到
+ *  一声轻微的「哒」。实测本曲接缝跳变 0.0455，是曲内普通相邻采样中位数的 16 倍。
+ *
+ *  做法：把开头 N 毫秒等功率交叉淡入到结尾，使 buffer 首尾真正衔接。
+ *  只在需要时执行（跳变明显大于曲内正常水平才做），避免无谓地改动音频。
+ *  代价是循环点附近约 30ms 的内容被混合，听感上完全无法察觉。
+ */
+const SEAM_FADE_MS = 30;
+function smoothLoopSeam(buf) {
+  if (!buf || buf.__seamFixed) return buf;
+  const n = buf.length, chs = buf.numberOfChannels;
+  if (n < 4096) return buf;
+  // 先判断值不值得处理：接缝跳变 vs 曲内相邻采样中位数
+  // ⚠ 口径必须一致：接缝是「相邻两个采样」之间的跳变，基准也要取相邻采样差。
+  // 若基准误用「间隔 N 采样」的差值，量纲完全不同（低频信号下大得多），
+  // 会把本来平滑的接缝误判成有台阶。
+  const c0 = buf.getChannelData(0);
+  const stride = Math.max(1, Math.floor(n / 20000));
+  const diffs = [];
+  for (let i = stride; i < n; i += stride) diffs.push(Math.abs(c0[i] - c0[i - 1]));
+  diffs.sort((a, b) => a - b);
+  const median = diffs[Math.floor(diffs.length / 2)] || 1e-6;
+  const seam = Math.abs(c0[0] - c0[n - 1]);
+  if (seam < median * 4) { buf.__seamFixed = true; return buf; }   // 本来就够平滑
+
+  const fade = Math.min(Math.floor(buf.sampleRate * SEAM_FADE_MS / 1000), Math.floor(n / 8));
+  let out;
+  try {
+    out = AC.createBuffer(chs, n - fade, buf.sampleRate);
+  } catch (e) { return buf; }
+  for (let c = 0; c < chs; c++) {
+    const src = buf.getChannelData(c);
+    const dst = out.getChannelData(c);
+    dst.set(src.subarray(0, n - fade));
+    // 尾部 fade 段与开头 fade 段做等功率交叉淡化，写回尾部
+    for (let i = 0; i < fade; i++) {
+      const k = i / fade;                        // 0→1
+      const a = Math.cos(k * Math.PI / 2);       // 尾部权重 1→0
+      const b = Math.sin(k * Math.PI / 2);       // 头部权重 0→1
+      dst[n - fade - fade + i] = src[n - fade - fade + i] * a + src[i] * b;
+    }
+  }
+  out.__seamFixed = true;
+  return out;
+}
+
+/** 停掉当前播放节点（不改 bgmPlaying / bgmGen，由调用方负责） */
+function teardownBgmNodes() {
+  if (bgmSrcNode) { try { bgmSrcNode.stop(); } catch (e) { /* 已停 */ } bgmSrcNode.disconnect(); bgmSrcNode = null; }
+  if (bgmGainNode) { bgmGainNode.disconnect(); bgmGainNode = null; }
+}
+
 export function startBgm() {
   if (MUTED || bgmPlaying) return;
-  // 首次播放需用户手势已激活 AudioContext（initAudio 已处理），HTMLAudio 同样受自动播放策略约束
-  if (!bgmAudio) {
-    bgmAudio = new Audio(BGM_SRC);
-    bgmAudio.loop = true;
-    bgmAudio.preload = 'auto';
-  }
+  initAudio();                         // 确保 AudioContext 存在且已 resume
+  if (!AC) return;                     // 无音频环境
   const gen = ++bgmGen;
   bgmPlaying = true;
-  if (bgmFadeRaf) { cancelAnimationFrame(bgmFadeRaf); bgmFadeRaf = null; } // 抢占进行中的淡出
-  const audio = bgmAudio;
-  audio.volume = 0;                    // 从 0 淡入，避免突兀
-  const playPromise = audio.play();
-  if (playPromise && typeof playPromise.catch === 'function') {
-    playPromise.catch(() => {
-      if (gen !== bgmGen) return;      // 已被后续 start/stop 取代，不动状态
-      // 自动播放被拦截：把 bgmPlaying 置回 false（否则永久锁死，再也不会尝试），
-      // 并注册一次性手势监听，在下次真实用户手势时重试
+  loadBgmBuffer().then(buf => {
+    if (gen !== bgmGen || !bgmPlaying) return;   // 期间已被 stop/再 start 取代
+    if (!buf) { bgmPlaying = false; return; }
+    // AudioContext 仍被自动播放策略挂起：解锁状态并等下次用户手势重试
+    if (AC.state === 'suspended') {
       bgmPlaying = false;
-      if (bgmFadeRaf) { cancelAnimationFrame(bgmFadeRaf); bgmFadeRaf = null; }
       hookBgmGestureRetry();
-    });
-  }
-  // 简易线性淡入（约 1.5s）
-  const fadeStart = performance.now();
-  const fadeDur = 1500;
-  const fadeStep = () => {
-    if (gen !== bgmGen || !bgmPlaying || bgmAudio !== audio) return;
-    const k = Math.min(1, (performance.now() - fadeStart) / fadeDur);
-    audio.volume = BGM_VOL * k;
-    if (k < 1) bgmFadeRaf = requestAnimationFrame(fadeStep);
-    else bgmFadeRaf = null;
-  };
-  fadeStep();
+      return;
+    }
+    teardownBgmNodes();
+    const src = AC.createBufferSource();
+    src.buffer = smoothLoopSeam(buf);  // 抹平尾→头的波形跳变
+    src.loop = true;                   // ★ 采样级精确循环，无帧补白
+    const g = AC.createGain();
+    const t = AC.currentTime;
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(BGM_VOL, t + BGM_FADE_IN);
+    src.connect(g); g.connect(AC.destination);
+    src.start(t);
+    bgmSrcNode = src; bgmGainNode = g;
+  });
 }
+
 export function stopBgm() {
   bgmPlaying = false;
   const gen = ++bgmGen;
-  if (bgmFadeRaf) { cancelAnimationFrame(bgmFadeRaf); bgmFadeRaf = null; }
-  if (bgmAudio) {
-    // 快速淡出后暂停（0.4s），避免咔哒声
-    const audio = bgmAudio;
-    const v0 = audio.volume;
-    const t0 = performance.now();
-    const out = () => {
-      if (gen !== bgmGen || bgmAudio !== audio) return; // 期间又 start 了：放弃这次淡出，绝不 pause
-      const k = Math.min(1, (performance.now() - t0) / 400);
-      audio.volume = v0 * (1 - k);
-      if (k < 1) { bgmFadeRaf = requestAnimationFrame(out); }
-      else { audio.pause(); bgmFadeRaf = null; }
-    };
-    out();
-  }
+  if (!AC || !bgmSrcNode || !bgmGainNode) { teardownBgmNodes(); return; }
+  const src = bgmSrcNode, g = bgmGainNode;
+  const t = AC.currentTime;
+  // 快速淡出后停止，避免咔哒声
+  g.gain.cancelScheduledValues(t);
+  g.gain.setValueAtTime(g.gain.value, t);
+  g.gain.linearRampToValueAtTime(0, t + BGM_FADE_OUT);
+  try { src.stop(t + BGM_FADE_OUT); } catch (e) { /* 已停 */ }
+  src.onended = () => {
+    if (gen !== bgmGen) return;        // 期间又 start 了：新节点已接管，别动它
+    if (bgmSrcNode === src) { bgmSrcNode = null; }
+    if (bgmGainNode === g) { bgmGainNode = null; }
+    src.disconnect(); g.disconnect();
+  };
 }
 
 // ---------- 二叉堆（A* 用） ----------
