@@ -1039,37 +1039,118 @@ export class Battle {
   }
 
   // ---------- AI ----------
+  // ---------- AI 辅助：目标价值评估 ----------
+  /** 一支部队的「威胁值」：输出能力 x 存活量。用来判断谁最该被优先干掉。 */
+  threatOf(st) {
+    const t = st.t;
+    const dmg = (t.dmg[0] + t.dmg[1]) / 2 * st.count;
+    const rangedBonus = t.shots && st.shotsLeft > 0 ? 1.35 : 1;   // 射手不用近身，威胁更持久
+    const flyBonus = t.fly ? 1.15 : 1;                             // 飞行机动性强
+    return dmg * rangedBonus * flyBonus;
+  }
+
+  /** 一支部队剩余总血量（用于判断能否一击打死）。 */
+  poolOf(st) { return (st.count - 1) * st.t.hp + st.topHP; }
+
+  /**
+   * 攻击目标打分：预期伤害 + 击杀奖励 + 威胁权重 - 反击惩罚。
+   * 这是 AI 从「打最近的」升级为「打最该打的」的核心。
+   */
+  scoreTarget(att, def, { shoot = false } = {}) {
+    const p = this.previewDamage(att, def);
+    const avg = (p.min + p.max) / 2;
+    const pool = this.poolOf(def);
+    let score = avg;
+    // 能一击打死：巨大加成（少一支部队 = 永久少一份输出）
+    if (avg >= pool) score += this.threatOf(def) * 2.2;
+    else {
+      // 打不死也按「削掉对方多少威胁」计价
+      score += this.threatOf(def) * (avg / Math.max(pool, 1)) * 1.1;
+      // 残血目标优先（补刀价值高）
+      const hpRatio = pool / Math.max(this.poolOf({ ...def, count: def.maxCount, topHP: def.t.hp }), 1);
+      if (hpRatio < 0.34) score *= 1.25;
+    }
+    // 近战会吃反击：按对方反打的期望伤害折价（已反击过的不算）
+    if (!shoot && def.alive && !def.retaliated) {
+      const back = this.previewDamage(def, att);
+      score -= (back.min + back.max) / 2 * 0.6;
+    }
+    return score;
+  }
+
   aiAct(st) {
     if (this.over || !st.alive) { this.endTurn(); return; }
-    // 远程：直接射击最近的敌人
-    if (this.canShoot(st)) {
-      const targets = this.aliveStacks(0);
-      targets.sort((a, b) => hexDistance(st.col, st.row, a.col, a.row) - hexDistance(st.col, st.row, b.col, b.row));
-      this.attack(st, targets[0], { shoot: true });
-      return;
-    }
     const targets = this.aliveStacks(0);
     if (!targets.length) { this.endTurn(); return; }
-    // 相邻则近战
+
+    // —— 远程：不再「射最近的」，改为射收益最高的（优先秒杀 / 优先干掉射手）——
+    if (this.canShoot(st)) {
+      let best = targets[0], bestScore = -Infinity;
+      for (const t of targets) {
+        const sc = this.scoreTarget(st, t, { shoot: true });
+        if (sc > bestScore) { bestScore = sc; best = t; }
+      }
+      this.attack(st, best, { shoot: true });
+      return;
+    }
+
+    // —— 近战且已贴身：在相邻目标里挑收益最高的（原来是取 adj[0]，等于随机）——
     const adj = this.adjacentEnemies(st);
-    if (adj.length) { this.attack(st, adj[0], {}); return; }
-    // 向最近敌人移动
+    if (adj.length) {
+      let best = adj[0], bestScore = -Infinity;
+      for (const t of adj) {
+        const sc = this.scoreTarget(st, t);
+        if (sc > bestScore) { bestScore = sc; best = t; }
+      }
+      this.attack(st, best, {});
+      return;
+    }
+
+    // —— 需要移动：评估「移动到某格 + 攻击某目标」的组合收益 ——
     const reach = this.computeReach(st);
-    let best = null, bestScore = Infinity;
+    const spd = this.effSpd(st);
+    let bestPlan = null, bestScore = -Infinity;
     for (const node of reach.values()) {
       if (node.noLand) continue;
-      let score = Infinity;
-      for (const t of targets) score = Math.min(score, hexDistance(node.c, node.r, t.col, t.row));
-      if (score < bestScore || (score === bestScore && best && node.d < best.d)) {
-        best = node; bestScore = score;
+      // 该格相邻有哪些敌人？
+      let hitBest = null, hitScore = -Infinity;
+      for (const [c, r] of hexNeighbors(node.c, node.r)) {
+        const e = this.stackAt(c, r);
+        if (!e || e.side !== 0) continue;
+        const sc = this.scoreTarget(st, e);
+        if (sc > hitScore) { hitScore = sc; hitBest = e; }
       }
+      let score;
+      if (hitBest) {
+        // 本回合就能打到：收益 = 攻击得分，早到一步略微加分
+        score = hitScore + (spd - node.d) * 0.5;
+      } else {
+        // 打不到：按「离最有价值目标更近」计分，负值确保永远劣于能打到的方案
+        let nearest = Infinity, nearestT = null;
+        for (const t of targets) {
+          const d = hexDistance(node.c, node.r, t.col, t.row);
+          const w = d - this.threatOf(t) / 400;     // 威胁高的目标更值得靠近
+          if (w < nearest) { nearest = w; nearestT = t; }
+        }
+        score = -1000 - nearest * 10;
+        // 射手被逼近战会被减半伤害，所以让己方射手尽量别主动贴脸（保持距离找机会）
+        if (st.t.shots && st.shotsLeft > 0) score -= 300;
+      }
+      if (score > bestScore) { bestScore = score; bestPlan = { node, target: hitBest }; }
     }
-    if (!best) { st.defending = true; this.endTurn(); return; }
+
+    if (!bestPlan) { st.defending = true; this.endTurn(); return; }
     this.active = st;
-    this.moveActive(best, () => {
+    this.moveActive(bestPlan.node, () => {
+      // 移动后重新确认目标仍可打（期间可能已阵亡）
       const adj2 = this.adjacentEnemies(st);
-      if (adj2.length) this.attack(st, adj2[0], {});
-      else this.endTurn();
+      if (!adj2.length) { this.endTurn(); return; }
+      let best = adj2[0], sc0 = -Infinity;
+      for (const t of adj2) {
+        const sc = this.scoreTarget(st, t);
+        if (sc > sc0) { sc0 = sc; best = t; }
+      }
+      this.attack(st, best, {});
     });
   }
 

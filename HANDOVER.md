@@ -87,6 +87,7 @@ node tests/homm_smoke.mjs "http://localhost:8000/?smoke=map" 30   # 冒烟
 node tests/homm_e2e.mjs                                           # 核心功能
 node tests/homm_e2e6.mjs                                          # 难度机制（警戒圈/成长/禁斜穿）
 node tests/homm_e2e7.mjs                                          # 模型朝向（八方向，防「倒着走/横着走」回归）
+node tests/homm_e2e8.mjs                                          # 战斗 AI 战术决策（集火残血/优先射手/避反击）
 node tests/homm_shot.mjs "http://localhost:8000/?smoke=battle" 12 /tmp/shot.png  # 截图
 ```
 6 轮 e2e 共 **110 项断言**（按 `check()` 调用数实测：e2e 23 / e2e2 18 / e2e3 23 / e2e4 20 /
@@ -686,7 +687,6 @@ prompt 关键词：`medieval, fantasy, orchestral, instrumental, loopable, game 
 | P3 | **多英雄** | 仅 1 个玩家英雄，H3 支持多英雄分头行动 |
 | P3 | **城镇建设** | 当前只有招募 + 兵营升级，缺建筑树 |
 | P3 | **法术等级** | 所有法术从开始可用，应绑定魔法塔等级 |
-| P3 | **战斗 AI** | 当前只射最近/走最近，缺优先击杀低血/利用障碍 |
 | P3 | **LOD 分级** | 大地图单位用 LOD1，战场用 LOD0（ROI 低，暂缓） |
 
 ### 8.2 本轮已解决（详见 `FIXES-2026-07-25.md`）
@@ -697,6 +697,7 @@ prompt 关键词：`medieval, fantasy, orchestral, instrumental, loopable, game 
 | P1 | **BGM 每循环一圈卡顿** | **已修**。mp3 帧补白导致 `<audio loop>` 每圈插 36ms 静音。改用 Web Audio 的 AudioBufferSourceNode.loop（采样级精确），与容器格式无关，仍用 mp3 |
 | P1 | **BGM 音质差** | **已解决**。换成 Kevin MacLeod《The Britons》（FreePD 公共领域），45s→304s、32kHz→44.1kHz。绕过的弯路：AudioGen 只有 medium 一个公开版本，且固定 16kHz 输出，模型再大也救不了高频 |
 | P2 | **音效质量差 / 8 个音效从未触发** | **已解决**。补接 death/arrow/fireball/block/turn/hurt 六处调用点；音效换 Kenney CC0 素材，16kHz→44.1kHz，体积反而更小 |
+| P3 | **战斗 AI 太笨** | **已重写**（2026-07-28）。旧 AI 三个短板：远程永远射最近、近战永远打 adj[0]（数组顺序=随机）、移动只看距离。新增 `scoreTarget()` 统一打分（预期伤害 + 击杀奖励 + 威胁权重 − 反击惩罚）与 `threatOf()` 威胁评估（输出×存活量，射手×1.35、飞行×1.15）；移动改为评估「移动到某格 + 攻击某目标」的组合收益，且己方射手不会主动贴脸（近战伤害减半）。回归测试 `tests/homm_e2e8.mjs` 7 项 |
 | P2 | **战场云遮挡视野** | **已修**。云原本撒在与相机活动球完全重叠的方盒里（实测 48.3% 机位会挡）。改环形远景分布（半径 45-70、高度 22-34），实测遮挡率 0% |
 | P1 | **SW 的 CDN 分支可能永不 settle** | **已修**（2026-07-28）。无缓存时 `.catch(() => cached)` 会 resolve 成 undefined 导致 respondWith 失败；网络不响应也不 reject 时永久挂起。加 8 秒超时兜底 + 保证任何分支都返回真实 Response（兜底 504） |
 | P1 | **BGM 关服务器后仍播放** | **已修**。挂 `pagehide`（比 beforeunload 可靠，覆盖移动端/bfcache）与 `visibilitychange`：切后台自动停、切回来恢复 |
