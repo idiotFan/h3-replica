@@ -31,3 +31,4 @@ art/preview/
 #（scripts/blender_export_models.py.bak*）不受影响。
 *.bak
 *.bak[0-9]
+delivery/

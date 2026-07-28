@@ -2,7 +2,7 @@
 import * as THREE from 'three';
 import { UNITS, MAP, MINES, ARTIFACTS } from './config.js';
 import { DIFF } from './difficulty.js';
-import { makeNoise, fbm, rand, randInt, choice, clamp, Tweens, easeLinear, makeTextSprite, sfx, MinHeap, disposeObject3D } from './utils.js';
+import { makeNoise, fbm, rand, randInt, choice, clamp, Tweens, easeLinear, makeTextSprite, sfx, MinHeap, disposeObject3D, tiltNode } from './utils.js';
 import { createHero, createCastle, createMine, createUnit, makePickup, makeArtifact } from './assets/factory.js';
 import { makeDetailTexture, makeWaterTexture, makeCloudSprite, makeGlowSprite, makeMoonSprite, makeSkyMaterial } from './textures.js';
 
@@ -892,14 +892,16 @@ export class WorldMap {
             eh.mesh.position.y = w.y + Math.abs(Math.sin(k * Math.PI)) * 0.15;
             // 单 mesh glb 模型：整体前后倾斜模拟马蹄节奏
             if (eh.mesh.userData.fromGltf) {
-              eh.mesh.rotation.x = Math.sin(k * Math.PI * 4) * 0.08;
-              eh.mesh.rotation.z = Math.sin(k * Math.PI * 2) * 0.04;
+              const t = tiltNode(eh.mesh);
+              t.rotation.x = Math.sin(k * Math.PI * 4) * 0.08;
+              t.rotation.z = Math.sin(k * Math.PI * 2) * 0.04;
             }
           },
           onDone: () => {
             if (eh.mesh.userData.fromGltf) {
-              eh.mesh.rotation.x = 0;
-              eh.mesh.rotation.z = 0;
+              const t = tiltNode(eh.mesh);
+              t.rotation.x = 0;
+              t.rotation.z = 0;
             }
             this.objects.delete(key(eh.x, eh.y));
             eh.x = st.x; eh.y = st.y;
@@ -1291,8 +1293,9 @@ export class WorldMap {
           this.heroMesh.position.y = w.y + Math.abs(Math.sin(k * Math.PI)) * 0.18;
           // 单 mesh 模型：整体前后倾斜模拟马蹄节奏（无骨骼也能有动感）
           if (this.heroMesh.userData.fromGltf) {
-            this.heroMesh.rotation.x = Math.sin(k * Math.PI * 4) * 0.08;   // 前后颠簸
-            this.heroMesh.rotation.z = Math.sin(k * Math.PI * 2) * 0.04;   // 左右轻晃
+            const t = tiltNode(this.heroMesh);                        // 写子节点，勿写被 lookAt 控制的本体
+            t.rotation.x = Math.sin(k * Math.PI * 4) * 0.08;          // 前后颠簸
+            t.rotation.z = Math.sin(k * Math.PI * 2) * 0.04;          // 左右轻晃
           }
           // 原语模型：马腿摆动
           const legs = this.heroMesh.userData.anim && this.heroMesh.userData.anim.legs;
@@ -1302,8 +1305,9 @@ export class WorldMap {
           const legs = this.heroMesh.userData.anim && this.heroMesh.userData.anim.legs;
           if (legs) for (const leg of legs) leg.rotation.x = 0;
           if (this.heroMesh.userData.fromGltf) {
-            this.heroMesh.rotation.x = 0;
-            this.heroMesh.rotation.z = 0;
+            const t = tiltNode(this.heroMesh);
+            t.rotation.x = 0;
+            t.rotation.z = 0;
           }
           this.hero.x = st.x; this.hero.y = st.y;
           this.hero.movePoints = Math.max(0, this.hero.movePoints - st.cost);
@@ -1535,7 +1539,7 @@ export class WorldMap {
         o.mesh.position.y = o.baseY + Math.abs(Math.sin(this.time * 2.2 + o.x * 1.3)) * 0.08;
         // 单 mesh glb 模型待机：轻微呼吸式起伏
         if (o.mesh.userData.fromGltf) {
-          o.mesh.rotation.x = Math.sin(this.time * 1.5 + o.x) * 0.015;
+          tiltNode(o.mesh).rotation.x = Math.sin(this.time * 1.5 + o.x) * 0.015;
         }
         // 野怪待机动画：振翅 / 幽灵波动
         const anim = o.mesh.userData.anim;
@@ -1555,7 +1559,7 @@ export class WorldMap {
         if (!this.enemyTurn) {
           o.mesh.position.y = o.baseY + Math.sin(this.time * 2.5 + o.x) * 0.03;
           if (o.mesh.userData.fromGltf) {
-            o.mesh.rotation.x = Math.sin(this.time * 1.5 + o.x) * 0.015;
+            tiltNode(o.mesh).rotation.x = Math.sin(this.time * 1.5 + o.x) * 0.015;
           }
         }
         const eAnim = o.mesh.userData.anim;
@@ -1576,7 +1580,7 @@ export class WorldMap {
       this.heroMesh.position.y = this.tileH[this.hero.x][this.hero.y] + Math.sin(this.time * 2.5) * 0.03;
       // 单 mesh 模型待机：轻微呼吸式起伏（模拟马匹站立时的轻微摆动）
       if (this.heroMesh.userData.fromGltf) {
-        this.heroMesh.rotation.x = Math.sin(this.time * 1.5) * 0.015;
+        tiltNode(this.heroMesh).rotation.x = Math.sin(this.time * 1.5) * 0.015;
       }
     }
     const hAnim = this.heroMesh.userData.anim;

@@ -2,7 +2,7 @@
 import * as THREE from 'three';
 import { UNITS, BATTLE, SPELLS } from './config.js';
 import { DIFF, damageCoef } from './difficulty.js';
-import { hexToWorld, hexNeighbors, hexDistance, Tweens, easeLinear, easeOut, rand, randInt, clamp, sfx, disposeObject3D } from './utils.js';
+import { hexToWorld, hexNeighbors, hexDistance, Tweens, easeLinear, easeOut, rand, randInt, clamp, sfx, disposeObject3D, tiltNode } from './utils.js';
 import { createUnit, makeObstacle, makeTree } from './assets/factory.js';
 import { makeDetailTexture, makeSkyMaterial, makeCloudSprite } from './textures.js';
 
@@ -602,16 +602,18 @@ export class Battle {
           if (legs) for (let li = 0; li < legs.length; li++) legs[li].rotation.x = Math.sin(k * Math.PI * 2) * 0.5 * (li % 2 ? 1 : -1);
           // 单 mesh glb 模型：整体前后倾斜模拟步态（无骨骼也能有动感）
           if (st.mesh.userData.fromGltf && !legs) {
-            st.mesh.rotation.x = Math.sin(k * Math.PI * 4) * 0.08;   // 前后颠簸
-            st.mesh.rotation.z = Math.sin(k * Math.PI * 2) * 0.04;   // 左右轻晃
+            const t = tiltNode(st.mesh);                             // 写子节点，勿写被 lookAt 控制的本体
+            t.rotation.x = Math.sin(k * Math.PI * 4) * 0.08;         // 前后颠簸
+            t.rotation.z = Math.sin(k * Math.PI * 2) * 0.04;         // 左右轻晃
           }
         },
         onDone: () => {
           const legs = st.mesh.userData.anim && st.mesh.userData.anim.legs;
           if (legs) for (const leg of legs) leg.rotation.x = 0;
           if (st.mesh.userData.fromGltf && !legs) {
-            st.mesh.rotation.x = 0;
-            st.mesh.rotation.z = 0;
+            const t = tiltNode(st.mesh);
+            t.rotation.x = 0;
+            t.rotation.z = 0;
           }
           i++; step();
         },
@@ -1098,7 +1100,7 @@ export class Battle {
         // 单 mesh glb 模型待机：轻微呼吸式起伏
         if (st.mesh.userData.fromGltf) {
           const anim = st.mesh.userData.anim;
-          if (!anim || !anim.legs) st.mesh.rotation.x = Math.sin(this.time * 1.5 + st.id) * 0.015;
+          if (!anim || !anim.legs) tiltNode(st.mesh).rotation.x = Math.sin(this.time * 1.5 + st.id) * 0.015;
         }
       }
       const anim = st.mesh.userData.anim;

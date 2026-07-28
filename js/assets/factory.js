@@ -246,23 +246,27 @@ function finalize(root, def, side) {
   const minY = box.min.y;
   const needsLift = !isFinite(minY) ? false : minY < -0.01 || minY > 0.01;
 
-  if (needsLift) {
-    const wrapper = new THREE.Object3D();
-    wrapper.add(root);
-    root.position.y = -minY;  // 抬高模型，使最低点到达 y=0
-    // 先透传 userData（动画/队伍色等），再加光环。
-    // 顺序反了的话，整体赋值会把 addFactionRing 刚写进 wrapper.userData 的
-    // ring 引用冲掉，同时让 addFactionRing 的去重守卫失效。
-    wrapper.userData = root.userData;
-    root.userData.wrapper = wrapper;
-    root.userData.root = root;  // 暴露内部 root，外部 scale 应作用到 root 而非 wrapper
-    // 队伍色环加在 wrapper（地面层），不随模型抬高
-    if (side !== undefined) addFactionRing(wrapper, side);
-    return wrapper;
-  }
-  if (side !== undefined) addFactionRing(root, side);
+  // ★ 永远套一层 wrapper（即使不需要抬升）。原因有二：
+  //   1. 抬升：root.position.y = -minY 让模型最低点贴合 y=0
+  //   2. **朝向解耦**：外部对 wrapper 调 lookAt()，颠簸/摇晃动画写在内层 root 上。
+  //      若两者写在同一个对象上，three.js 对含 -Z 分量（朝北）的朝向会用
+  //      (±180°, 180°−θ, ±180°) 这种退化欧拉表示，单独给 .x/.z 赋值会静默丢掉
+  //      那对 ±180°，朝向被绕世界 X 轴镜像——实测正北误差 180°（倒着走）、
+  //      东北/西北 90°（横着走）。结构统一后此类 bug 从根上不可能发生。
+  const wrapper = new THREE.Object3D();
+  wrapper.add(root);
+  if (needsLift) root.position.y = -minY;
+  // 先透传 userData（动画/队伍色等），再加光环。
+  // 顺序反了的话，整体赋值会把 addFactionRing 刚写进 wrapper.userData 的
+  // ring 引用冲掉，同时让 addFactionRing 的去重守卫失效。
+  wrapper.userData = root.userData;
+  root.userData.wrapper = wrapper;
   root.userData.root = root;
-  return root;
+  // 倾斜动画节点：所有 rotation.x/.z 的颠簸摇晃都必须写这里，不要写 wrapper
+  root.userData.animNode = root;
+  // 队伍色环加在 wrapper（地面层）：不随模型抬高，也不跟着颠簸倾斜
+  if (side !== undefined) addFactionRing(wrapper, side);
+  return wrapper;
 }
 
 /**

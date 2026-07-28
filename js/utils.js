@@ -134,6 +134,25 @@ export function disposeObject3D(obj) {
 
 // ---------- 3D → 屏幕坐标 ----------
 const _pv = new THREE.Vector3();
+/** 取「倾斜动画节点」——颠簸/摇晃的 rotation.x / rotation.z 必须写到这里。
+ *
+ *  ⚠ 绝对不要把倾斜直接写到被 lookAt() 控制的那个对象上。
+ *  three.js 对含 -Z 分量（朝北）的朝向，欧拉 XYZ 分解结果是
+ *  (±180°, 180°−θ, ±180°) 而非 (0, θ, 0)——数学等价但表示是退化的。
+ *  单独给 .x / .z 赋值会静默丢掉那对 ±180°，只剩 180°−θ，
+ *  等于把朝向绕世界 X 轴镜像了。实测朝向误差：
+ *      东/西/南/东南/西南  0°      正常
+ *      正北               180°    倒着走
+ *      东北/西北           90°     横着走
+ *  写到子节点则是「相对朝向的俯仰/翻滚」，与 lookAt 完全解耦，语义也更对。
+ *
+ *  glb 资产由 factory.js finalize() 保证有 animNode；原语模型没有该节点，
+ *  但它们走的是 anim.legs 摆腿分支，不会用到倾斜，回退到自身是安全的。
+ */
+export function tiltNode(obj) {
+  return (obj && obj.userData && obj.userData.animNode) || obj;
+}
+
 export function projectToScreen(v3, camera, out = {}) {
   _pv.copy(v3).project(camera);
   out.x = (_pv.x * 0.5 + 0.5) * window.innerWidth;

@@ -45,6 +45,7 @@ rsync -avz --delete \
   --exclude 'scripts' \
   --exclude 'art/preview' \
   --exclude 'art/_src' \
+  --exclude 'delivery' \
   --exclude '__pycache__' \
   --exclude '*.bak' \
   --exclude '*.bak2' \
