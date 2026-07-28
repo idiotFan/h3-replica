@@ -7,7 +7,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { MAP, UNITS, MINES, ARTIFACTS, SKILLS } from './config.js';
 import { DIFF, setDifficulty, getDifficultyKey } from './difficulty.js';
-import { Tweens, initAudio, sfx, clamp, setMuted, startBgm, stopBgm } from './utils.js';
+import { Tweens, initAudio, sfx, clamp, setMuted, startBgm, stopBgm, preloadSfx } from './utils.js';
 import { WorldMap } from './map.js';
 import { Battle } from './battle.js';
 import { UI } from './ui.js';
@@ -397,6 +397,7 @@ function enterMap() {
   renderer.domElement.style.outline = 'none';
   renderer.domElement.focus({ preventScroll: true });
   startBgm();
+  preloadSfx();                        // 预热音效文件，避免首次触发时才现拉造成延迟
   guideStep();
 }
 

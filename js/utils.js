@@ -206,8 +206,64 @@ function noiseBurst(dur, vol = 0.15, delay = 0, { type = 'lowpass', freq = 0, fr
   last.connect(g); g.connect(AC.destination);
   src.start(t); src.stop(t + dur + 0.05);
 }
+// ---------- 音效文件（AudioGen 生成）----------
+// 优先播放真实音效文件；文件缺失/解码失败时自动回退到下面的程序化合成音，
+// 保证任何情况下都有反馈（离线、art/audio/sfx 被裁掉、旧缓存等场景）。
+const SFX_DIR = 'art/audio/sfx/';
+const sfxBuffers = new Map();      // kind -> AudioBuffer | null(已确认不可用)
+const sfxLoading = new Map();      // kind -> Promise
+const SFX_VOL = 0.5;
+
+function loadSfx(kind) {
+  if (sfxBuffers.has(kind)) return Promise.resolve(sfxBuffers.get(kind));
+  if (sfxLoading.has(kind)) return sfxLoading.get(kind);
+  const p = fetch(SFX_DIR + kind + '.mp3')
+    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.arrayBuffer(); })
+    .then(ab => new Promise((res, rej) => {
+      const ret = AC.decodeAudioData(ab, res, rej);
+      if (ret && typeof ret.then === 'function') ret.then(res, rej);
+    }))
+    .then(buf => { sfxBuffers.set(kind, buf); sfxLoading.delete(kind); return buf; })
+    .catch(() => { sfxBuffers.set(kind, null); sfxLoading.delete(kind); return null; });  // 标记不可用，不再重试
+  sfxLoading.set(kind, p);
+  return p;
+}
+
+/** 预加载全部音效（进入游戏时调用，避免首次触发才现拉导致延迟） */
+export function preloadSfx() {
+  if (!AC) return Promise.resolve();
+  return Promise.all(SFX_FILES.map(loadSfx));
+}
+
+function playSfxBuffer(buf) {
+  const src = AC.createBufferSource();
+  src.buffer = buf;
+  const g = AC.createGain();
+  g.gain.value = SFX_VOL;
+  src.connect(g); g.connect(AC.destination);
+  src.start();
+  src.onended = () => { src.disconnect(); g.disconnect(); };
+}
+
+/** 有音效文件的种类。不在此列的（如无）直接走合成音。 */
+const SFX_FILES = ['hit', 'attack', 'hurt', 'block', 'death', 'arrow', 'shoot',
+                   'magic', 'spell', 'fireball', 'move', 'pickup', 'select',
+                   'click', 'turn', 'level', 'win', 'lose'];
+
 export function sfx(kind) {
   if (!AC || MUTED) return;
+  // 已加载好的文件：直接播
+  const buf = sfxBuffers.get(kind);
+  if (buf) { playSfxBuffer(buf); return; }
+  // 尚未加载且该 kind 有文件：异步拉取，本次先用合成音顶上（不留空白）
+  if (buf === undefined && SFX_FILES.includes(kind)) {
+    loadSfx(kind);
+  }
+  sfxSynth(kind);
+}
+
+/** 程序化合成音效（音效文件的回退方案） */
+function sfxSynth(kind) {
   switch (kind) {
     case 'hit':    tone(220, 60, 0.15, 'square', 0.2); break;
     case 'shoot':  tone(900, 300, 0.12, 'sawtooth', 0.12); break;
