@@ -5,15 +5,16 @@
 > 仓库：**https://gitee.com/idiotfan/h3-replica**（master 分支）
 > 技术栈：Three.js r160（CDN + importmap）· 纯 ES Module · 零构建 · Meshy glb 资产
 
-**当前状态（2026-08-03 交接给 K3）**
+**当前状态（2026-08-03 · 第二轮）**
 
 | | |
 |---|---|
-| 代码 | 6500 行 JS，本地 / Gitee / 线上**三方同步** |
-| 测试 | **8 轮 135 项**端到端（见 §1 自动化测试），实测全绿 |
-| 美术 | 17 个角色模型（Meshy 生成，已统一体型与风格） |
+| 代码 | ~7400 行 JS，本地 / Gitee / 线上**三方同步** |
+| 测试 | **8 轮 135 项**端到端 + 建筑视觉回归（`tests/homm_buildings_visual.mjs`） |
+| 美术 | **22 个模型全部 Meshy 生成**（17 角色 + 5 建筑），已统一 lowpoly 风格 |
 | 音频 | BGM 46s 无缝循环 + 18 个 Kenney CC0 音效（见 §4.8） |
-| 下一步 | 建议先**完整试玩**摸平衡性，再做城镇建设（见 §8.4） |
+| 建筑 | 5 个建筑已从 Blender 原语换为 Meshy 版，**但城堡渲染发黑问题未解决**（见 §8.1 P0） |
+| 下一步 | **先修城堡发黑**（P0），再试玩摸平衡，最后做城镇建设（见 §8.4） |
 
 ---
 
@@ -30,15 +31,12 @@ python3 -m http.server 8000
 
 > ## ⚠️ 危险：`gen:blender` / `gen:glb` 会**覆盖 Meshy 重制的模型**
 >
-> 这两个脚本产出的是**早期 Blender 原语模型**，会把 `art/export/**` 下 17 个角色 glb
->（15 兵种 + 2 英雄，均为 2026-07-24~25 Meshy AI 重制并跑过压缩管线的版本）**整体写回旧版**。
+> 这两个脚本产出的是**早期 Blender 原语模型**，会把 `art/export/**` 下全部 22 个 glb
+>（15 兵种 + 2 英雄 + 5 建筑，均为 Meshy AI 重制并跑过压缩管线的版本）**整体写回旧版**。
 > `art/_src/` 里有 Meshy 原件可以重跑 `npm run compress:assets` 恢复，
 > 但 `art/_src/` **不在 git 里**（见 `.gitignore`），一旦本机丢失就再也回不来了。
 >
-> **要重新出角色模型，用 §4.4b 的压缩管线，不要用这两个脚本。**
-> 这两个脚本现在只对 5 个建筑（`castle_*` / `mine_*`）是安全且唯一的复现手段——
-> 建筑没有 Meshy 版，`art/_src` 下也没有它们的副本。
-> 若只想重出建筑，请先备份 `art/export/units` 和 `art/export/heroes`。
+> **要重新出模型，用 §4.4b 的压缩管线，不要用这两个脚本。**
 
 ```bash
 npm install                    # 装依赖（three / gltf-transform / sharp / meshoptimizer）
@@ -146,16 +144,17 @@ K3版H3/
 │       ├── loader.js        # GLTFLoader 封装（缓存/分阶段懒加载/失败回退）
 │       └── factory.js       # 统一工厂（glb 优先，回退 models.js 原语）
 ├── art/
-│   ├── export/              # ★ 上线资产：22 个 glb，合计 3.69MB（3,864,140 字节）
-│   │   ├── units/           # 15 兵种（5 基础 + 5 精锐 + 5 野怪），2.45MB，全部 Meshy 重制+压缩
-│   │   ├── heroes/          # 玩家/敌方英雄 2 个，708KB，Meshy 重制+压缩
-│   │   └── buildings/       # 城堡×2 + 矿场×3，567KB，仍是 Blender 原语导出（未进压缩管线）
+│   ├── export/              # ★ 上线资产：22 个 glb，合计 ~4.5MB
+│   │   ├── units/           # 15 兵种（5 基础 + 5 精锐 + 5 野怪），2.5MB，全部 Meshy 重制+压缩
+│   │   ├── heroes/          # 玩家/敌方英雄 2 个，712KB，Meshy 重制+压缩
+│   │   └── buildings/       # 城堡×2 + 矿场×3，1.4MB，Meshy 重制+压缩（JPEG 贴图，无法线/MR）
 │   ├── audio/
 │   │   └── bgm_map.mp3      # 248KB，MusicGen 生成的地图 BGM（js/utils.js 的 BGM_SRC）
-│   ├── _src/                # ⛔ 不入 git、不上线：Meshy 原件 154MB（唯一副本！）
+│   ├── _src/                # ⛔ 不入 git、不上线：Meshy 原件（唯一副本！）
 │   │   ├── units/ heroes/   #    压缩管线的输入（118MB + 17MB）
+│   │   ├── buildings/       #    5 个建筑 Meshy 原件（~46MB），2026-08-03 新增
 │   │   ├── blender_elite/   #    被 Meshy 版替换掉的旧 Blender 精锐兵 5 个（568KB）
-│   │   └── _export_bak/     #    2026-07-25 从 art/export 搬来的 19 个 *.glb.bak/.bak2（17MB）
+│   │   └── _export_bak/     #    2026-07-25 从 art/export 搬来的旧 glb 备份（17MB）
 │   └── preview/             # ⛔ 不入 git、不上线：离线渲染的对比预览图 31MB
 ├── scripts/
 │   ├── compress_assets.mjs       # ★ glb 压缩管线：art/_src → art/export（§4.4b）
@@ -232,20 +231,20 @@ ui.js（DOM 更新）          ui.js（战场 UI）
 
 ### 4.3 资产管线（assets/）
 - `manifest.js`：每个单位 key 对应一个 glb path，`path: null` 时回退原语
-- `loader.js`：**分阶段懒加载**——`getBootAssets()` 返回首屏必需的 **9 个 glb**（玩家英雄 1 +
-  城堡 1 + 矿场 3 + 初始兵种 4：pikeman/archer/griffin/swordsman），**首屏阻塞下载 1,327,244 字节 ≈ 1.27MB**；
-  `getBackgroundAssets()` 返回进入游戏后后台加载的 **13 个 glb**（5 野怪 + 5 精锐 + champion +
-  敌方英雄 + 敌方城堡），**2,536,896 字节 ≈ 2.42MB**。两组相加正好 3,864,140 字节 = `art/export`
-  目录总量，**22 个 glb 全部被引用，无孤儿资产**（2026-07-25 实测）
-- 首屏 9 个文件明细：hero_player 372KB / griffin 174KB / castle_player 161KB / swordsman 155KB /
-  pikeman 126KB / archer 97KB / mine_sawmill 92KB / mine_gold 62KB / mine_ore 58KB。
-  将来若还要再砍首屏，唯一值得动的单点是 `hero_player.glb`（占首屏 29%，其中贴图占它自身 65%），
-  把 baseColor/normal 从 1024 降到 512 约省 200KB
+- `loader.js`：**分阶段懒加载**--`getBootAssets()` 返回首屏必需的 **13 个 glb**（玩家英雄 1 +
+  双方城堡 2 + 矿场 3 + 初始兵种 4 + champion 1 + 敌方英雄 1 + 敌方城堡 1：2026-08-03 改为全部 5 建筑进首屏，
+  避免后台加载竞态导致敌方城堡长时间停在原语）；
+  `getBackgroundAssets()` 返回进入游戏后后台加载的 **9 个 glb**（5 野怪 + 4 精锐兵种）
 - `preloadGroup(groups)` 按分组加载；加载完成后 `world.refreshObjectMeshes()` 自动把原语回退的对象替换为 glb
   - ⚠ **`refreshObjectMeshes()` 必须重放战争迷雾**：新建的 mesh 默认 `visible=true`，
     后台资产换入时会把雾下对象一起点亮（2026-07-25 实测 41 个雾下对象有 20 个突然显形）。
     修复见 `map.js` 的 `refreshObjectMeshes()` 末尾
-- `factory.js`：`createUnit(type, side)` → 有 glb 用 glb（clone + 队伍色 + 底座环），否则 `makeUnit(type, side)`
+  - ⚠ **后台加载与 `world.build()` 的竞态**：`boot()` 里后台 `preloadGroup` 的 `.then()` 可能在
+    `world.build()` 之前就 resolve（此时 `world.built` 还是 false，`refreshObjectMeshes` 跳过）。
+    2026-08-03 加了 `bgAssetsReady` 标记 + build 后补刷新。最稳方案是把全部建筑放进 boot assets（已做）
+- `factory.js`：`createUnit(type, side)` -> 有 glb 用 glb（clone + 队伍色 + 底座环），否则 `makeUnit(type, side)`
+- **建筑工厂**：`createCastle(faction)` / `createMine(kind)` 走 `cloneGltfScene` + `finalize`，
+  与单位共用路径。2026-08-03 建筑的 `receiveShadow` 被设为 `false`（自阴影把大建筑涂黑）
 - **队伍色**：glb 中名为 `TeamColor` 的网格/材质自动替换为蓝/红
 - **翅膀/旗帜**：名为 `WingL/WingR/Flag` 的节点自动绑定待机动画
 
@@ -571,7 +570,7 @@ fireball / move / pickup / select / click / turn / level / win / lose。
 
 ### 2026-07-23 体验优化（已上线）
 - **美术+性能优化**：① PMREM 环境贴图——金属盔甲/铁器/金边获得真实环境反射，告别塑料纯色；② Bloom 后期处理——`threshold 0.85` 只让 emissive 元素发光（龙眼橙红/骷髅眼绿/幽灵眼青/城堡窗口暖黄/金矿水晶/法术特效），low 画质自动关闭省 GPU；③ 确认装饰物已是 InstancedMesh（树 trunk+leaf + 石头各 1 draw call）、1600 地块单 PlaneGeometry、战场六边形 InstancedMesh，draw call 已压到个位数
-- **资源懒加载**：`loader.js` 分阶段加载——启动加载核心资产 **9 个 glb**（玩家英雄 1 + 城堡 1 + 矿场 3 + 初始兵种 4，共 1.27MB），后台加载剩余 **13 个**（5 野怪 + 5 精锐 + champion + 敌方英雄 + 敌方城堡，共 2.42MB）；`world.refreshObjectMeshes()` 在后台加载完成后自动替换原语回退模型；首屏等待时间减半。详细清单与字节数见 §4.3
+- **资源懒加载**：`loader.js` 分阶段加载--启动加载核心资产 **13 个 glb**（玩家英雄 + 双方城堡 + 矿场 + 初始兵种 + champion + 敌方英雄，2026-08-03 改为全部 5 建筑进首屏避免竞态），后台加载剩余 **9 个**（5 野怪 + 4 精锐兵种）；`world.refreshObjectMeshes()` 在后台加载完成后自动替换原语回退模型。详细清单见 §4.3
 - **PWA 离线**：`manifest.json` + `sw.js`，支持"添加到主屏幕"当 App 用；本地资源 cache-first、CDN stale-while-revalidate；仅 https 生效（localhost 跳过避免开发干扰）
 - **撤销移动**：`map.js undoMove()` + `#btn-undo` 按钮，移动完成后显示，只能撤销最后一次移动；进入战斗/结束回合后清空
 - **存档导出/导入**：设置弹窗加导出/导入按钮，导出下载 JSON 文件，导入校验格式后写 localStorage 刷新生效
@@ -877,6 +876,7 @@ ssh rtx3060                      # 已配好别名与公钥，免密
 
 | 优先级 | 问题 | 现状 / 修复方向 |
 |--------|------|----------------|
+| **P0** | **城堡渲染发黑** | 5 个建筑已换 Meshy 版并压缩上线，但**用户反馈城堡是「黑乎乎一个大块」**。headless Chrome 截图里城堡可见（偏暗绿灰），用户真实浏览器里是纯黑剪影。**已尝试**：① 压低 metalness（m=0.06）；② 转 MeshLambertMaterial；③ 提亮贴图（brightness 1.55）；④ 关闭 `receiveShadow`（自阴影）。headless 测试全过但用户侧仍黑。**未排查方向**：浏览器差异（Safari WebGL？）、WebGL 着色器编译失败（需用户 F12 控制台报错）、SW 缓存旧 glb（`sw.js` 对 `art/` 走 cache-first，硬刷新在 Safari 可能不绕过 SW）。**下一步**：让用户 F12 看 console 报错 + 清空 site data；或给 glb 路径加 `?v=` 查询参数强制绕过 SW 缓存。建筑资产压缩参数：`--format jpeg --no-normal --drop-metallic-roughness --metallic 0 --roughness 1`，建筑 prompt 见 `art/_src/buildings/` 生成记录 |
 | P2 | **战斗中偶发怪物模型消失** | 用户报告「打斗过程中某个怪物的模型就不见了」。**已尝试自动化复现但未捕获**：插桩跑了两场完整战斗（含近战/反击/死亡），每帧对每个存活单位检查 7 项不变量（脱离场景 / `visible=false` / 缩放≈0 / 无 mesh / 材质透明度<0.08 / 位置偏离所属六边形>4.5 / 沉入地下），**0 次异常**。静态也已排除：无代码把战场单位设为不可见、单位无 frustumCulled 问题、队伍环几何是每单位新建（不受死亡单位 dispose 连累）、共享贴图/几何的 `shared` 标记确实生效。**下次排查需要更具体的复现条件**：是否为刚阵亡的单位（死亡动画是设计如此）、头顶数字标签是否还在（在=渲染层问题，不在=逻辑层）、是否特定兵种（幽灵本身就是半透明设计）。探针脚本见 scratchpad 的 `ghost2.mjs`，可复用 |
 | P2 | **骨骼动画缺失** | 22 个 glb 全部无 armature（Meshy 版是单 mesh，旧 Blender 版是 bmesh 原语）。真骨骼动画需重制 **17 个角色模型**（15 兵种 + 2 英雄；建筑不需要），是纯美术工程、成本高。当前程序化动画（颠簸/晃动/呼吸，见 §六）观感尚可，**因此从 P0 降级为 P2**——它不影响可玩性，也不影响线上稳定性，长期挂在 P0 会挤占真正紧急项的注意力 |
 | P3 | **多英雄** | 仅 1 个玩家英雄，H3 支持多英雄分头行动 |
@@ -961,13 +961,21 @@ ssh rtx3060                      # 已配好别名与公钥，免密
 
 ---
 
-### 8.4 下一步建议（2026-08-03 交接）
+### 8.4 下一步建议（2026-08-03 第二轮）
 
 按**性价比**排序，不按原优先级：
 
-**0. 先完整试玩一遍（最推荐，成本最低）**
+**0. 先修城堡发黑（P0，见 §8.1）**
 
-所有真实 bug 都是靠人工试玩发现的——倒着走、云挡视野、音质差、循环卡顿，
+5 个建筑已换 Meshy 版但城堡在用户浏览器里是黑剪影。headless 测试通过但用户侧复现，
+说明是浏览器 / GPU / SW 缓存差异。**需要用户提供 F12 控制台报错截图**才能定位。
+若确认是 SW 缓存：给 `manifest.js` 的建筑 glb 路径加 `?v=2` 查询参数强制绕过 cache-first。
+若确认是 WebGL 着色器：建筑改用 `MeshLambertMaterial`（已在 `factory.js` 的 `hardenBuildingMaterials` 里实现但当前注释掉了，可恢复）。
+若以上都不是：考虑建筑回退到旧 Blender 原语（`art/_src/_export_bak/buildings/` 有备份），角色保持 Meshy。
+
+**1. 先完整试玩一遍（城堡修好后）**
+
+所有真实 bug 都是靠人工试玩发现的--倒着走、云挡视野、音质差、循环卡顿，
 **135 项自动化测试一个都没抓到**，因为它们全是体感问题。
 尤其战斗 AI 刚重写（§8.2），敌人会集火残血、优先杀射手、避开反击，
 **手感变化很大，可能明显变难**，平衡性需要真人判断。数值在 `difficulty.js` 里调。
@@ -1080,20 +1088,23 @@ __game.readSave()                        // 读取存档
 
 ---
 
-*文档版本：**2026-07-25（晚间更新）** · 与代码库当前状态同步。*
+*文档版本：**2026-08-03（第二轮更新）** · 与代码库当前状态同步。*
 
-*本次更新补入三项未完成 TODO 的完整交接信息：*
-*① **朝向 bug**（§8.3）—— 根因已精确定位到 9 处代码位置，含实测误差表与两种修法，**注意不要用 rotY 去修**；*
-*② **BGM 音质**（§7.2）—— 升级方案就绪但 Mac 上太慢已叫停，含实测速率、MPS 避坑记录、RTX 3060 + WSL2 迁移建议；*
-*③ **战斗中怪物消失**（§8.1）—— 自动化复现失败的完整记录与已排除项，列出下次排查所需的具体信息。*
+*本次（2026-08-03 第二轮）更新：*
+*§状态表：22 个模型全部 Meshy 化（含 5 建筑），标注城堡发黑 P0 未解决。*
+*§一：建筑危险警告更新--建筑现在也有 Meshy 原件在 `art/_src/buildings/`，`gen:blender/gen:glb` 对全部 22 个模型都危险。*
+*§二：`art/export/buildings` 改为 Meshy+JPEG 压缩（1.4MB），`art/_src/buildings` 新增（46MB）。*
+*§8.1：新增 P0「城堡渲染发黑」--完整记录已尝试的 4 种修法、headless 与用户侧的差异、未排查方向。*
+*§8.4：下一步改为「先修城堡发黑」，补充了 SW cache-first 对 glb 的影响与 `?v=` 绕过方案。*
+*§十一：行数表待重算（前端 ~7400 行 + 工具 ~5100 行）。*
 
-*本次（2026-07-25）文档改动：§一 加 `gen:blender/gen:glb` 覆盖 Meshy 模型的危险警告、更新部署排除清单与
+*上一轮（2026-08-03 交接）文档改动：§一 加 `gen:blender/gen:glb` 覆盖 Meshy 模型的危险警告、更新部署排除清单与
 测试项数（110 项实测）；§二 结构树按实测体积重写并补上 `art/_src` / `art/audio` / 全部 scripts；
 §4.3 补首屏 9 个 / 后台 13 个 glb 的精确字节数；§4.4 加覆盖警告；§4.4b 补压缩管线参数表与「为什么不能直接上线」；
 §4.5 难度表按重写后的 `difficulty.js` 全量更新（拆分玩家/敌方伤害系数、`bossScale`、单调性约定）；
 **§4.7 新增 Service Worker 更新机制**（四个必须成立的条件 + 缓存策略 + 自检 + 残余风险）；
 §六 修正 scale 应作用于 wrapper（旧文档说反了）、程序化动画行号按实测重列、懒加载数字、BGM 已换 mp3；
-§八 待解决问题表重写（分「仍未解决」与「本轮已解决」，骨骼动画 P0→P2，删掉不存在的 `probe_units.py` 引用）；
+§八 待解决问题表重写（分「仍未解决」与「本轮已解决」，骨骼动画 P0->P2，删掉不存在的 `probe_units.py` 引用）；
 §十一 行数表按 `wc -l` 全部重算（旧表合计与各行相加矛盾）。*
 
 *配套文档：`FIXES-2026-07-25.md`（本轮 P0/P1/P2 修复清单 + 验证方式 + 残余风险）、`ART_SPEC.md`（美术规范）。*

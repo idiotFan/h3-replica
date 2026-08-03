@@ -50,15 +50,64 @@ function normalizeSingleMeshMaterial(root) {
   root.traverse((o) => {
     if (!o.isMesh || !o.material) return;
     for (const m of matsOf(o)) {
-      if (!m || !m.emissive) continue;
-      if (SINGLE_MESH_EMISSIVE <= 0) {
-        m.emissive.setRGB(0, 0, 0);
-        // emissive 为黑时 emissiveMap 无意义，摘掉省一次 2048² 采样
-        if (m.emissiveMap) { m.emissiveMap = null; m.needsUpdate = true; }
-      } else {
-        m.emissive.multiplyScalar(SINGLE_MESH_EMISSIVE);
+      if (!m) continue;
+      if (m.emissive) {
+        if (SINGLE_MESH_EMISSIVE <= 0) {
+          m.emissive.setRGB(0, 0, 0);
+          // emissive 为黑时 emissiveMap 无意义，摘掉省一次 2048² 采样
+          if (m.emissiveMap) { m.emissiveMap = null; m.needsUpdate = true; }
+        } else {
+          m.emissive.multiplyScalar(SINGLE_MESH_EMISSIVE);
+        }
       }
+      // 建筑类 Meshy 的 MR 贴图常把 metalness 拉满，无 env 高光时整模发黑。
+      if (typeof m.metalness === 'number' && m.metalness > 0.45 && !m.metalnessMap) {
+        m.metalness = Math.min(m.metalness, 0.12);
+      } else if (typeof m.metalness === 'number' && m.metalness > 0.9 && m.metalnessMap) {
+        m.metalness = 0.15;
+      }
+      if (typeof m.roughness === 'number' && m.roughness < 0.35) m.roughness = 0.65;
     }
+  });
+}
+
+/**
+ * 建筑专用：Meshy PBR + 大地图阴影/ACES 下容易整模发黑成剪影。
+ * 转 MeshLambert（与地形一致）、去掉 normal/MR、提亮 baseColor，保证远景可读。
+ */
+function hardenBuildingMaterials(root) {
+  root.traverse((o) => {
+    if (!o.isMesh || !o.material) return;
+    const srcList = matsOf(o);
+    const next = srcList.map((src) => {
+      if (!src) return src;
+      if (src.userData?.buildingHardened) return src;
+      const map = src.map || null;
+      const color = src.color ? src.color.clone() : new THREE.Color(0xffffff);
+      // 提亮：Meshy 贴图偏暗，再乘一点避免剪影
+      color.multiplyScalar(1.45);
+      color.r = Math.min(1, color.r);
+      color.g = Math.min(1, color.g);
+      color.b = Math.min(1, color.b);
+      const mat = new THREE.MeshLambertMaterial({
+        map,
+        color,
+        side: THREE.DoubleSide,
+        transparent: !!src.transparent,
+        opacity: src.opacity ?? 1,
+      });
+      if (map) {
+        map.colorSpace = THREE.SRGBColorSpace;
+        map.needsUpdate = true;
+      }
+      mat.userData = { ...(src.userData || {}), buildingHardened: true };
+      // 几何与贴图仍 shared，只换材质实例
+      if (src.userData?.shared) mat.userData.shared = true;
+      return mat;
+    });
+    o.material = next.length === 1 ? next[0] : next;
+    o.castShadow = true;
+    o.receiveShadow = false; // 大建筑自阴影容易涂黑
   });
 }
 
@@ -319,9 +368,9 @@ export function createCastle(faction = 'player') {
     if (gltf) {
       const root = cloneGltfScene(gltf);
       if (root) {
-        // 兼容旗帜动画
         root.traverse((o) => {
           if (/flag/i.test(o.name || '')) root.userData.flag = o;
+          if (o.isMesh) o.receiveShadow = false;
         });
         return finalize(root, def, faction === 'enemy' ? 1 : 0);
       }
@@ -341,7 +390,10 @@ export function createMine(kind) {
     const gltf = getCached(def.path);
     if (gltf) {
       const root = cloneGltfScene(gltf);
-      if (root) return finalize(root, def);
+      if (root) {
+        root.traverse((o) => { if (o.isMesh) o.receiveShadow = false; });
+        return finalize(root, def);
+      }
     }
   }
   return makeMinePrim(kind);

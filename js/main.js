@@ -1107,7 +1107,9 @@ async function boot() {
     if (tip) tip.textContent = '使用程序化模型';
   }
   // 后台预加载剩余资产（不阻塞启动；加载完成后刷新地图上仍用原语的对象模型为 glb）
-  preloadGroup(getBackgroundAssets()).then(() => {
+  let bgAssetsReady = false;
+  const bgPromise = preloadGroup(getBackgroundAssets()).then(() => {
+    bgAssetsReady = true;
     if (world && world.built) {
       try { world.refreshObjectMeshes(); } catch (e) { console.warn('[boot] 刷新对象模型异常', e); }
     }
@@ -1131,6 +1133,11 @@ async function boot() {
       world.fromSave = false;
     }
   }
+  // 若后台资产已先于 build 完成，上面的 then 会因 !built 跳过刷新，这里补一次
+  if (bgAssetsReady && world.built) {
+    try { world.refreshObjectMeshes(); } catch (e) { console.warn('[boot] 补刷新对象模型异常', e); }
+  }
+  void bgPromise;
   if (bootSave && state.mode === 'start') {
     const bc = document.getElementById('btn-continue-save');
     if (bc) bc.classList.remove('hidden');

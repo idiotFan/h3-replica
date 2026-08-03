@@ -61,11 +61,12 @@ export const HERO_ASSETS = {
 };
 
 export const BUILDING_ASSETS = {
-  castle_player: { path: `${B}/castle_player.glb`, scale: 1, polyBudget: 6000, fallback: 'primitive' },
-  castle_enemy:  { path: `${B}/castle_enemy.glb`, scale: 1, polyBudget: 6000, fallback: 'primitive' },
-  mine_sawmill:  { path: `${B}/mine_sawmill.glb`, scale: 1, polyBudget: 2000, fallback: 'primitive' },
-  mine_ore:      { path: `${B}/mine_ore.glb`, scale: 1, polyBudget: 2000, fallback: 'primitive' },
-  mine_gold:     { path: `${B}/mine_gold.glb`, scale: 1, polyBudget: 2000, fallback: 'primitive' },
+  // targetH：大地图 tile=2；城堡约 2.4（可读且不吞镜头），矿场约 1.5
+  castle_player: { path: `${B}/castle_player.glb`, targetH: 2.4, polyBudget: 6000, singleMesh: true, fallback: 'primitive' },
+  castle_enemy:  { path: `${B}/castle_enemy.glb`, targetH: 2.4, polyBudget: 6000, singleMesh: true, fallback: 'primitive' },
+  mine_sawmill:  { path: `${B}/mine_sawmill.glb`, targetH: 1.5, polyBudget: 4000, singleMesh: true, fallback: 'primitive' },
+  mine_ore:      { path: `${B}/mine_ore.glb`, targetH: 1.4, polyBudget: 4000, singleMesh: true, fallback: 'primitive' },
+  mine_gold:     { path: `${B}/mine_gold.glb`, targetH: 1.4, polyBudget: 4000, singleMesh: true, fallback: 'primitive' },
 };
 
 export const TEAM_COLORS = {

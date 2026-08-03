@@ -122,22 +122,23 @@ export async function preloadUnits(unitTypes) {
   return preloadAssets(defs);
 }
 
-/** 启动时必需的核心资产（玩家英雄+城堡+初始兵种+矿场） */
+/** 启动时必需的核心资产（玩家英雄+双方城堡+初始兵种+矿场） */
 export function getBootAssets() {
   return {
     units: ['pikeman', 'archer', 'griffin', 'swordsman'],
     heroes: ['player'],
-    buildings: ['castle_player', 'mine_sawmill', 'mine_ore', 'mine_gold'],
+    // 建筑总共 ~1.3MB，全部进首屏，避免后台竞态导致敌方城堡长时间停在原语
+    buildings: ['castle_player', 'castle_enemy', 'mine_sawmill', 'mine_ore', 'mine_gold'],
   };
 }
 
-/** 后台预加载剩余资产（野怪+敌方+精锐兵种） */
+/** 后台预加载剩余资产（野怪+敌方英雄+精锐兵种） */
 export function getBackgroundAssets() {
   return {
     units: ['champion', 'pikeman2', 'archer2', 'griffin2', 'swordsman2', 'champion2',
             'wolf', 'skeleton', 'orc', 'ghost', 'dragon'],
     heroes: ['enemy'],
-    buildings: ['castle_enemy'],
+    buildings: [],
   };
 }
 
