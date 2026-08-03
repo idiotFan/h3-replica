@@ -85,6 +85,22 @@ async function main() {
   check('植被实例已建立地块映射', !veg.err, veg.err || '');
   check(`每个实例的隐藏状态都与探索状态一致 (${veg.tot} 个)`, veg.mis === 0, `不一致 ${veg.mis}`);
 
+  console.log('== 2b. 水格永不遮雾（没有船，远海永远探索不到）==');
+  const water = await evl(`(() => {
+    const w = __game.world, ctx = w._fogCtx, SS = w._fogSS;
+    let waterMax = 0, landMin = 256, waterN = 0, landN = 0;
+    for (let x = 0; x < w.type.length; x++) for (let y = 0; y < w.type[x].length; y++) {
+      const e = w.explored[x][y];
+      if (e) continue;                        // 只看未探索格
+      const a = ctx.getImageData(x * SS + SS / 2, y * SS + SS / 2, 1, 1).data[3];
+      if (w.type[x][y] === 'water') { waterN++; if (a > waterMax) waterMax = a; }
+      else { landN++; if (a < landMin) landMin = a; }
+    }
+    return { waterN, landN, waterMax, landMin };
+  })()`);
+  check(`未探索水格全透明 (${water.waterN} 格, 最大alpha=${water.waterMax})`, water.waterMax === 0);
+  check(`未探索陆格仍被遮蔽 (${water.landN} 格, 最小alpha=${water.landMin})`, water.landMin > 200);
+
   console.log('== 3. 城堡不再被迷雾抹黑（离屏渲染实测像素）==');
   const px = await evl(`(async () => {
     const THREE = await import('three');
@@ -120,10 +136,10 @@ async function main() {
     return { bad, good };
   })()`);
   check('能取到城堡像素', !px.err, px.err || '');
-  // ⚠ 用相对判据而非固定百分点差：地图是程序化随机生成的，城堡与未探索区的
-  // 相对位置每局都不同，实测差值在 4.5～14.5 个百分点间浮动，写死 5 会偶发误报。
-  check(`城堡区域黑色占比显著低于 depthTest=false 时 (${px.good}% vs ${px.bad}%)`,
-        px.good <= px.bad * 0.9, `期望至少相对降低 10%`);
+  // 注：曾有一项「depthTest true vs false 的 A/B 对比」，在水格不再画雾之后
+  // 已无意义——雾的覆盖面大幅缩小，开关 depthTest 的差值缩到噪声级
+  // （实测 17.3% vs 18.5%）。depthTest 配置本身由第 1 节专项把关，
+  // 这里只保留绝对阈值：城堡区域不允许被大面积抹黑。
   check(`城堡区域黑色占比 < 25%`, px.good < 25, `实际 ${px.good}%`);
 
   console.log('\n== 运行时错误 ==');

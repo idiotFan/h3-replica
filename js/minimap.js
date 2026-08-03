@@ -41,12 +41,16 @@ export class Minimap {
     this.t = 0;
     const c = this.ctx, s = SIZE / MAP.W;
     c.drawImage(this.terrainCache, 0, 0);
-    // 战争迷雾：未探索区域涂黑
+    // 战争迷雾：未探索区域涂黑。
+    // 水格跳过，与主视图口径一致——没有船，远海永远探索不到，涂黑只会让
+    // 小地图常年一片黑（水格占全图 43%），完全失去导航价值。
     const exp = this.world.explored;
     if (exp) {
       c.fillStyle = '#0a0e1a';
+      const ty = this.world.type;
       for (let x = 0; x < MAP.W; x++) for (let y = 0; y < MAP.H; y++)
-        if (!exp[x][y]) c.fillRect(Math.floor(x * s), Math.floor(y * s), Math.ceil(s), Math.ceil(s));
+        if (!exp[x][y] && !(ty[x] && ty[x][y] === 'water'))
+          c.fillRect(Math.floor(x * s), Math.floor(y * s), Math.ceil(s), Math.ceil(s));
     }
     const vis = this.world.visible;
     for (const o of this.world.objects.values()) {

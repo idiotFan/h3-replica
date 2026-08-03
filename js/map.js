@@ -422,6 +422,7 @@ export class WorldMap {
       new THREE.MeshLambertMaterial({ color: 0x6fbf5f }), grassSpots.length * 2);
     let i = 0;
     const tuftColor = new THREE.Color();
+    const tuftTileOf = new Int32Array(grassSpots.length * 2 * 2);   // 每格 2 株
     for (const [x, y] of grassSpots) {
       const w = this.tileWorld(x, y);
       for (let k = 0; k < 2; k++) {
@@ -431,11 +432,15 @@ export class WorldMap {
         dummy.updateMatrix();
         tuft.setMatrixAt(i, dummy.matrix);
         tuft.setColorAt(i, tuftColor.setHSL(0.29 + Math.random() * 0.06, 0.5, 0.32 + Math.random() * 0.15));
+        tuftTileOf[i * 2] = x; tuftTileOf[i * 2 + 1] = y;
         i++;
       }
     }
     tuft.instanceColor.needsUpdate = true;
     this.scene.add(tuft);
+    // 注册进迷雾隐藏机制——否则未探索黑区上会露出绿色小锥体（远看像小树）
+    this._veg = this._veg || [];
+    this._veg.push({ meshes: [tuft], tileOf: tuftTileOf, base: [tuft.instanceMatrix.array.slice()] });
     // 野花
     const flower = new THREE.InstancedMesh(
       new THREE.SphereGeometry(0.07, 6, 5),
@@ -453,6 +458,10 @@ export class WorldMap {
     });
     flower.instanceColor.needsUpdate = true;
     this.scene.add(flower);
+    const flowerTileOf = new Int32Array(flowerSpots.length * 2);
+    flowerSpots.forEach(([x, y], idx) => { flowerTileOf[idx * 2] = x; flowerTileOf[idx * 2 + 1] = y; });
+    this._veg = this._veg || [];
+    this._veg.push({ meshes: [flower], tileOf: flowerTileOf, base: [flower.instanceMatrix.array.slice()] });   // 白色小点在黑区上极显眼
     // 蝴蝶（草地飞舞）
     this.butterflies = [];
     const bColors = [0xffe9f0, 0xffd76b, 0xc58aff, 0x9fd8ff];
@@ -1189,7 +1198,16 @@ export class WorldMap {
     ctx.globalCompositeOperation = 'source-over';
     ctx.clearRect(0, 0, W, H);
     // 1) 基底：未探索=近不透明黑，已探索=半透明灰（让树冠/建筑穿透可见）
+    //
+    // ★ 水格一律不画雾，保持全透明。两个理由：
+    //   a. 游戏没有船，英雄只能走陆地——远离海岸的水格【永远无法被探索】
+    //      （实测占全图 43%），涂黑就是一块永久消不掉的大黑板。
+    //   b. 迷雾平面只盖地图范围，而水面网格延伸到地图外。地图外的海是亮的、
+    //      地图内未探索的海是近黑，两者拼在一起就是用户看到的「直边大黑块」。
+    //      水不遮雾后，图内海 = 图外海，边界彻底消失。
+    //   战争迷雾的信息意义全在陆地上（怪、矿、宝物、敌堡都在陆地），不受影响。
     for (let x = 0; x < MW; x++) for (let y = 0; y < MH; y++) {
+      if (this.type[x][y] === 'water') continue;   // 水格永远清澈
       ctx.fillStyle = this.explored[x][y] ? 'rgba(10,14,28,0.52)' : 'rgba(6,9,18,0.97)';
       ctx.fillRect(x * SS, y * SS, SS, SS);
     }
@@ -1207,9 +1225,10 @@ export class WorldMap {
       ctx.fillStyle = g;
       ctx.fillRect(cx - R, cy - R, R * 2, R * 2);
     }
-    // 3) 重绘未探索格，盖住径向渐变溢出到未探索区域的擦除
+    // 3) 重绘未探索格，盖住径向渐变溢出到未探索区域的擦除（水格同样跳过）
     ctx.globalCompositeOperation = 'source-over';
     for (let x = 0; x < MW; x++) for (let y = 0; y < MH; y++) {
+      if (this.type[x][y] === 'water') continue;
       if (!this.explored[x][y]) {
         ctx.fillStyle = 'rgba(6,9,18,0.97)';
         ctx.fillRect(x * SS, y * SS, SS, SS);
