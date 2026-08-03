@@ -18,11 +18,20 @@ function check(name, cond, extra = '') {
   if (cond) { pass++; console.log(`  ✔ ${name}`); }
   else { fail++; console.log(`  ✘ ${name} ${extra}`); }
 }
+// 等到「轮到玩家 且 动画播完」。
+// ⚠ 只等 active.side===0 是不够的：battle 的玩家动作（retreat / defendAction / castSpell）
+// 都有 `if (this.busy) return` 守卫，动画未播完时会静默失败。
+// 2026-08-03 战斗 AI 重写后 AI 移动更频繁、动画更长，这个缺口变成了 3 次挂 2 次的 flaky。
 async function waitPlayerTurn() {
-  for (let i = 0; i < 30; i++) {
-    const side = await evl(`(() => { const b = __game.getBattle(); return b && b.active ? b.active.side : -1; })()`);
-    if (side === 0) return true;
-    await sleep(800);
+  for (let i = 0; i < 40; i++) {
+    const st = await evl(`(() => {
+      const b = __game.getBattle();
+      if (!b || b.over) return { side: -1, busy: false, over: true };
+      return { side: b.active ? b.active.side : -1, busy: !!b.busy, over: false };
+    })()`);
+    if (st.over) return false;
+    if (st.side === 0 && !st.busy) return true;
+    await sleep(500);
   }
   return false;
 }
@@ -125,12 +134,14 @@ async function main() {
   })()`));
   await evl(`__game.getBattle().defendAction()`);
   await waitPlayerTurn();
-  await evl(`(() => { __game.state.hero.skills = {}; Math.random = () => 0.5; const b = __game.getBattle(); b.castSpell('chain', b.aliveStacks(1)[0]); })()`);
+  // ⚠ Math.random 必须先存原件后恢复，否则后续所有随机性被永久钉死在 0.5
+  await evl(`(() => { __game.state.hero.skills = {}; window.__origRandom = Math.random; Math.random = () => 0.5; const b = __game.getBattle(); b.castSpell('chain', b.aliveStacks(1)[0]); })()`);
   await sleep(1500);
   check('连环闪电施放（MP 足够时扣 8）', await evl(`(() => {
     const b = __game.getBattle();
     return b.spellRound === b.round;
   })()`));
+  await evl(`(() => { if (window.__origRandom) { Math.random = window.__origRandom; delete window.__origRandom; } return true; })()`);
   console.log('== 4. 撤退 ==');
   await evl(`__game.getBattle().defendAction()`);
   await waitPlayerTurn();

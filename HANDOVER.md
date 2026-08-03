@@ -3,7 +3,17 @@
 > Three.js 复刻《英雄无敌3》：异形岛屿大地图探索 + 六边形回合制战场 + 英雄成长 + 敌方阵营 AI  
 > 线上：**https://h3.idiotfan.wang**  
 > 仓库：**https://gitee.com/idiotfan/h3-replica**（master 分支）
-> 技术栈：Three.js r160（CDN + importmap）· 纯 ES Module · 零构建 · Blender glb 资产
+> 技术栈：Three.js r160（CDN + importmap）· 纯 ES Module · 零构建 · Meshy glb 资产
+
+**当前状态（2026-08-03 交接给 K3）**
+
+| | |
+|---|---|
+| 代码 | 6500 行 JS，本地 / Gitee / 线上**三方同步** |
+| 测试 | **8 轮 135 项**端到端（见 §1 自动化测试），实测全绿 |
+| 美术 | 17 个角色模型（Meshy 生成，已统一体型与风格） |
+| 音频 | BGM 46s 无缝循环 + 18 个 Kenney CC0 音效（见 §4.8） |
+| 下一步 | 建议先**完整试玩**摸平衡性，再做城镇建设（见 §8.4） |
 
 ---
 
@@ -39,9 +49,22 @@ npm run gen:glb                # ⚠ 同上，Node + three.js 备用导出，质
 
 ### 发布到线上（惯例：每次更改完都要发布）
 
+> ⚠ **`git push` 和 `deploy.sh` 是两条独立的线，别只做一半。**
+> `deploy.sh` 只是 rsync 到 VPS（线上生效），**不碰 git**；VPS 上只有编译产物、没有 git 历史。
+> 只 deploy 不 push = 线上是新的但代码没备份；只 push 不 deploy = 代码存了但线上还是旧的。
+> 完整流程是**两条都跑**：
+> ```bash
+> git add -A && git commit -m "..." && git push origin master   # 备份到 Gitee
+> ./scripts/deploy.sh                                            # 发布到线上
+> ```
+
 ```bash
 ./scripts/deploy.sh            # 一键发布：rsync 到 tap-vps:/var/www/h3 + 自动验证 HTTP 200
 ```
+
+> `deploy.sh` 会把 `sw.js` 里的 `__BUILD_VERSION__` 占位符替换成实际构建版本号，
+> 所以**线上 sw.js 与本地必然不同**，这是 SW 更新机制的设计，不是同步失败。
+> 核对时要先把版本号归一再 diff。
 
 **前置条件**：本机 `~/.ssh/config` 里有 `tap-vps` 别名且免密可登（`ssh tap-vps true` 验证）。
 
@@ -436,15 +459,72 @@ deploy.sh                     index.html                        sw.js
 - **本地**：SW 在 localhost 默认**跳过**（避免旧缓存干扰开发）。需要验证生命周期时加 `?sw=1` 显式打开
 - `deploy.sh` 第 5 步会自动 curl 校验线上 sw.js 里能读到本次的 `BUILD_VERSION`
 
-#### ⚠ 已知残余风险（尚未处理）
+#### ✅ 曾经的残余风险（2026-07-28 已修复）
 
-`sw.js` 的 CDN 分支（stale-while-revalidate）里 `e.respondWith()` 拿到的 Promise
-在离线/CDN 挂掉时**可能永不 settle**（`cached` 为空且 `fetch` 既不 resolve 也不 reject 时）。
-2026-07-25 的动态验证中实测到它的后果：新 SW 已装好并进入 waiting，
-但 `waiting → active` 的交接被卡住十几秒不动——因为页面对 jsdelivr/loli.net 的请求
-挂在老 SW 的这个分支上。把测试副本的外部依赖剥掉后立刻 3 秒轮换。
-**修复方向**：给 CDN 分支的 fetch 加超时兜底（`Promise.race` + timeout），
-或在 `cached` 为空时直接放行网络请求不 respondWith。
+`sw.js` 的 CDN 分支（stale-while-revalidate）曾有**两个坑叠加**：
+
+1. 无缓存时 `.catch(() => cached)` 会 resolve 成 `undefined`，而 `respondWith(undefined)`
+   让请求彻底失败（three.js / 字体拉不到 = 页面直接废）。
+2. `fetch` 既不 resolve 也不 reject 时（弱网、CDN 黑洞）`respondWith` 永不 settle，页面一直转圈。
+
+2026-07-25 实测到后果：新 SW 装好进入 waiting，但 `waiting → active` 交接卡住十几秒——
+因为页面对 jsdelivr/loli.net 的请求挂在老 SW 这个分支上。剥掉外部依赖后立刻 3 秒轮换。
+
+**现行实现**：有缓存立刻返回并后台静默刷新；无缓存走 `CDN_TIMEOUT_MS`（8 秒）超时兜底，
+超时后再给网络一次机会，仍失败返回 504 —— **保证任何分支都返回真实 Response**。
+
+---
+
+### 4.8 音频系统（utils.js）★ 2026-08-03 新增
+
+音频经历了「程序化合成 → AI 生成 → 成熟素材库」的完整弯路，结论写在这里避免重走。
+
+#### BGM：Web Audio 精确循环
+
+**绝不要用 `<audio loop>`。** mp3 是分帧格式，编码器会补白到整帧；即使带 Xing/Info 头
+声明了精确采样数，也有播放器忽略它，于是每循环一圈多插约 **36ms 静音**——表现就是
+「每 N 秒咔一下」，而原因在**播放侧不在音源**。
+
+现行实现：`fetch` → `decodeAudioData`（遵守 Xing 头，解出精确 PCM）→
+`AudioBufferSourceNode.loop = true`（采样级精确）。好处是**与容器格式无关**，
+仍可用 mp3（兼容性最好），不必换 ogg（Safari 对 ogg 支持不稳）。
+
+`smoothLoopSeam(buf)` 是**换音源时的安全网**：接缝跳变明显大于曲内正常水平（>4 倍中位数）
+时，做 30ms 等功率交叉淡化。换《The Britons》时它把接缝从 0.056 抹到 0.00004（改善 1525 倍）。
+
+> ⚠ **度量口径必须一致**：接缝是「相邻两个采样」的跳变，基准也要取相邻采样差。
+> 曾误用「间隔 N 采样」的差值做基准，量纲完全不同，把本来平滑的接缝误判成有台阶。
+
+#### 音效：文件优先 + 合成音回退
+
+`sfx(kind)` 优先播 `art/audio/sfx/<kind>.mp3`；**加载/解码失败自动降级到程序化合成音**
+（`sfxSynth()`），保证离线、资源被裁、旧缓存等场景都有声音，不会变成哑巴游戏。
+进入地图时 `preloadSfx()` 一次性预热。
+
+18 种音效：hit / attack / hurt / block / death / arrow / shoot / magic / spell /
+fireball / move / pickup / select / click / turn / level / win / lose。
+
+> 历史坑：这 18 种里曾有 **8 种是死代码**（定义在 switch 里但全项目零调用点），
+> 导致阵亡、格挡、箭矢、火球全是静音。2026-07-28 补接了 6 处；
+> `attack` / `spell` 与 `hit` / `magic` 语义重复，保留定义但不强接。
+
+#### 素材来源与结论
+
+| | 当前方案 | 授权 |
+|---|---|---|
+| BGM | 用户提供的 `h3_bgm_map_loop.mp3`（46s / 44.1kHz / 1.4MB，专为循环制作） | 自备 |
+| 音效 | **Kenney CC0** 素材库（rpg-audio / impact-sounds / interface-sounds / ui-audio / music-jingles） | CC0，零约束 |
+
+**结论：对网页小游戏，成熟素材库的质量下限远高于 AI 生成，而且成套供应保证风格统一
+——这点比「每个都独特」重要得多。** 绕过的弯路见 §7.2。
+
+推荐来源：
+- 音乐 —— [incompetech.com](https://incompetech.com/music/royalty-free/)（Kevin MacLeod，CC-BY）、
+  [freepd.com](https://freepd.com)（公共领域，连署名都不要）
+- 音效 —— [kenney.nl/assets](https://kenney.nl/assets)（CC0，**首推**）、
+  [freesound.org](https://freesound.org)（有 REST API 可批量拉）
+- 需要库里找不到的特定音效时，**ElevenLabs 有专门的 Sound Effects API**（48kHz，按量付费）。
+  **MiniMax 没有音效模型**——它只有 TTS 和 music-3.0（已查证官方接口清单）。
 
 ---
 
@@ -550,9 +630,44 @@ deploy.sh                     index.html                        sw.js
 
 ---
 
-## 七、AI 辅助美术工具（Skill）
+## 七、AI 辅助美术/音频工具（Skill）
 
-项目内置两个 TRAE Skill，封装 AI 美术生成流程。位于 `.trae/skills/`，**不公开到 git/线上**（已在 `.gitignore` 和 `deploy.sh` 排除）。
+分两类：
+
+| 位置 | Skill | 用途 | 状态 |
+|------|-------|------|------|
+| `.trae/skills/` | `meshy-3d-gen` | 文本生成 3D 模型 | 在用（17 个角色由它产出） |
+| `.trae/skills/` | `musicgen-bgm` | 本地 MusicGen 生成 BGM | **已弃用**，见 7.2 |
+| `~/.claude/skills/` | `minimax-music` | MiniMax music-3.0 生成音乐 + 裁无缝循环 | **推荐**，见 7.3 |
+
+`.trae/skills/` 下的**不公开到 git/线上**（已在 `.gitignore` 和 `deploy.sh` 排除）。
+`~/.claude/skills/` 是用户级全局 skill，不属于本仓库，换机器需要单独同步。
+
+### 7.0 各类 API Key 怎么拿 ★ 2026-08-03
+
+> 🔒 **本文档会推到 Gitee，因此只记录「key 存在哪里 / 怎么申请」，绝不记录 key 本身。**
+> 接手时若发现某个 key 失效或缺失，按下表自行获取并写入对应位置。
+
+| 用途 | 环境变量 | 落盘位置（首选） | 申请地址 | 计费 |
+|------|---------|-----------------|---------|------|
+| **MiniMax 音乐**（§7.3） | `MINIMAX_API_KEY` | `~/.claude/skills/minimax-music/key.txt`（权限 600，**已存在**） | [platform.minimaxi.com](https://platform.minimaxi.com) → 账户管理 → 接口密钥 | ¥1/首，`--free` 免费 |
+| **Meshy 3D 模型**（§7.1） | `MESHY_API_KEY` | 仅环境变量，不落盘 | [meshy.ai](https://www.meshy.ai) → Settings → API Keys | 按积分，免费额度有限 |
+| **HuggingFace**（可选） | `HF_TOKEN` | `~/.cache/huggingface/token` | [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) → New token（Read 权限即可） | 免费 |
+
+**读取优先级**：脚本一律「先环境变量，后落盘文件」。临时切换用
+`export MINIMAX_API_KEY=<新key>`，只影响当前 shell 会话。
+
+**几条硬规矩**：
+
+1. **绝不把 key 写进本仓库任何文件**（含本文档、代码、注释、commit message）。
+   `.gitignore` 已覆盖 `.trae/` 与 `MESHY_API_KEY*`，但那只是兜底，不是许可。
+2. **key 泄露到聊天记录/日志里就当它已失效**，去后台轮换掉再用。
+3. **MiniMax 的区域必须匹配**：国内 key 用 `api.minimaxi.com`（脚本内置默认），
+   海外 key 要改成 `api.minimax.io`，否则一律报 `1004` 鉴权失败。
+4. **HuggingFace 的 gated 模型**（如 Stable Audio Open）除了 token，还要先去模型页
+   点 **Agree and access repository** 接受许可，否则带 token 也是 401。
+   > 本项目**已不需要** HF token —— 音乐走 MiniMax、音效用 Kenney 素材库。
+   > 仅当要在 §7.4 那台机器上跑本地模型时才需要。
 
 ### 7.1 meshy-3d-gen —— 文本生成 3D 模型
 
@@ -606,9 +721,18 @@ node scripts/meshy_gen.mjs \
 
 **用途**：本地部署 Meta MusicGen 模型生成游戏 BGM，替换 `art/audio/*.mp3`。
 
-> ⚠ **当前状态（2026-07-25）**：线上仍是**旧版 BGM**（`small` 模型 / 单声道 / **67kbps**），用户反馈音质差。
-> 升级用的脚本已改好、模型已缓存、MPS 加速已验证，但**生成太慢被叫停**（见下方「实测速率」），
-> 换 RTX 3060 机器重跑的方案待定。**这是一项未完成的 TODO。**
+> ⛔ **已弃用（2026-08-03）**。保留本节只为记录踩过的坑，**新需求一律走 7.3 的 `minimax-music`**。
+>
+> 弃用原因（按发现顺序）：
+> 1. **Mac 上太慢** —— MPS 生成 45 秒立体声要 10-15 分钟/首，三个候选就是一下午。
+> 2. **换 RTX 3060 快了 5 倍但仍不够好** —— 134-143 秒/首，可产出了，但 MusicGen 这代模型的
+>    LRA 只有 1.2-2.2 LU（一般音乐 5-10 LU），产出偏平、缺起伏，属「能听、不出戏」的水准。
+> 3. **音效方向彻底走不通** —— 试过 Meta AudioGen（同属 audiocraft），它**固定输出 16kHz**，
+>    奈奎斯特上限 8kHz = 电话音质。金属撞击的「锵」、UI 的「嗒」全靠 8kHz 以上高频，
+>    **换多大的模型都发不出来**（而且 AudioGen 只有 medium 一个公开版本，large/small 在 HF 上是 401）。
+>
+> **结论**：自建 MusicGen/AudioGen 这条线的性价比不如「成熟素材库 + 商业 API」。
+> 音乐走 `minimax-music`，音效走 Kenney CC0 素材库（见 §4.8）。
 
 **前置条件**：
 - 本项目用 `.venv`（**不要升级 torch**，2.1.0 是 audiocraft 1.3.0 的兼容版本）：
@@ -673,6 +797,77 @@ prompt 关键词：`medieval, fantasy, orchestral, instrumental, loopable, game 
 
 ---
 
+### 7.3 minimax-music —— MiniMax music-3.0 生成音乐 ★ 2026-08-03 新增（推荐）
+
+**位置**：`~/.claude/skills/minimax-music/`（用户级全局 skill，**不在本仓库**，换机器要单独同步）
+**触发**：对 Claude 说「生成 BGM」「做首纯音乐」「游戏配乐」「循环 BGM」等即可自动调用。
+
+**为什么用它而不是本地 MusicGen**：云端调用、单首约 1 分钟出结果、质量明显更好，
+且自带 `loopify.py` 做定长无缝循环——这正是游戏 BGM 最麻烦的一环。
+
+| 脚本 | 作用 |
+|------|------|
+| `generate.py` | 调 API 生成（带唱 / 纯音乐 / 自动作词 / 翻唱四种模式） |
+| `loopify.py` | 裁成定长无缝循环 + 客观验收（对齐整小节、扫描起点、等功率交叉淡化） |
+
+```bash
+S=~/.claude/skills/minimax-music
+
+# 游戏 BGM 典型用法：先免费试风格
+python3 $S/generate.py "中世纪奇幻大地图探索，鲁特琴+竖琴+木笛，中慢速约 80 BPM，\
+  严格不要：人声、鼓组、电子合成器" --instrumental --free -o test.mp3
+
+# 方向对了跑付费定稿（¥1/首）
+python3 $S/generate.py "<同上>" --instrumental -o raw.mp3
+
+# 裁成 45 秒无缝循环，并导出连播三遍的试听文件
+python3 $S/loopify.py raw.mp3 -o art/audio/bgm_map.mp3 -L 45 --preview 3
+```
+
+**关键约束**（详见 skill 内 SKILL.md）：
+
+- **API key** 存在 `~/.claude/skills/minimax-music/key.txt`（权限 600）或环境变量 `MINIMAX_API_KEY`。
+  **绝不要把 key 写进本仓库任何文件**——本文档会推到 Gitee。
+- **区域必须匹配**：国内 key 配 `api.minimaxi.com`（脚本内置），海外 key 要改 `api.minimax.io`。
+- **按「首」计费 ¥1，不按秒**。试风格一律先加 `--free`（免费，仅限 RPM 3）。
+- **接口没有 duration 参数**，时长完全不可控（纯音乐实测 97-126 秒）。要定长必须过 `loopify.py`。
+- **循环 BGM 的 prompt 写法和一次性配乐相反**：要写「全曲同调性同速度、平稳流动、
+  明确不要前奏尾奏、不要渐强、不要淡出结尾」，且必须写否定项，否则它会自己加鼓和人声。
+- **HTTP 200 不代表成功**，要看 `base_resp.status_code`（脚本已处理）。
+
+---
+
+### 7.4 RTX 3060 远程机器 ★ 2026-07-28 接入
+
+一台带 **RTX 3060 12GB** 的 Windows 机器，通过 frp 暴露 SSH，可用于跑本地 GPU 任务
+（Stable Diffusion、本地模型推理等）。BGM/音效已改用云端方案，这台机器目前**空闲备用**。
+
+```bash
+ssh rtx3060                      # 已配好别名与公钥，免密
+```
+
+| 项 | 值 |
+|---|---|
+| 连接 | `ssh rtx3060`（`~/.ssh/config` 已配，密钥 `~/.ssh/id_ed25519_rtx3060`） |
+| GPU | RTX 3060 **12GB**，driver 591.86 |
+| 系统 | Windows（sshd 是 `OpenSSH_for_Windows`），干活环境在 **WSL2 Ubuntu-24.04** |
+| Python 环境 | `~/bgm/.venv`（Python 3.11 + torch 2.1.0+cu121 + audiocraft 1.3.0） |
+
+**⚠ 这条链路的最大坑：引号嵌套。** 命令要穿过
+`本地 bash → ssh → Windows cmd → wsl -- bash -lc "..."` 四层，栽过三次：
+
+1. `setsid nohup ... &` —— 进程被 SSH 断开回收，日志零字节
+2. `cat > file << "EOF"` —— heredoc 在 cmd 层被截断
+3. `grep -vE "pattern"` —— 引号被吃，整条命令没执行
+
+**可靠做法**：把命令写成本地 `.sh` 文件 → `scp` 传过去 → `ssh rtx3060 'wsl -- bash ~/xxx.sh'`。
+只有一层引号，怎么写都安全。另外 cmd 是 **GBK 编码**，中文输出会乱码，命令尽量用英文。
+
+**公钥安装的坑**：Windows OpenSSH 对**管理员账户**不读 `~/.ssh/authorized_keys`，
+只读 `C:\ProgramData\ssh\administrators_authorized_keys`。`ssh-copy-id` 写前者会被无视。
+
+---
+
 ## 八、当前待解决问题（2026-07-25 重写）
 
 > 本轮（2026-07-25）修掉的 P0/P1/P2 已从本表移除，完整清单与验证方式见 **`FIXES-2026-07-25.md`**。
@@ -697,6 +892,7 @@ prompt 关键词：`medieval, fantasy, orchestral, instrumental, loopable, game 
 | P1 | **BGM 每循环一圈卡顿** | **已修**。mp3 帧补白导致 `<audio loop>` 每圈插 36ms 静音。改用 Web Audio 的 AudioBufferSourceNode.loop（采样级精确），与容器格式无关，仍用 mp3 |
 | P1 | **BGM 音质差** | **已解决**。换成 Kevin MacLeod《The Britons》（FreePD 公共领域），45s→304s、32kHz→44.1kHz。绕过的弯路：AudioGen 只有 medium 一个公开版本，且固定 16kHz 输出，模型再大也救不了高频 |
 | P2 | **音效质量差 / 8 个音效从未触发** | **已解决**。补接 death/arrow/fireball/block/turn/hurt 六处调用点；音效换 Kenney CC0 素材，16kHz→44.1kHz，体积反而更小 |
+| — | **e2e4 撤退用例 flaky（3 次挂 2 次）** | **已修**（2026-08-03）。战斗 AI 重写后 AI 移动更频繁、动画更长，暴露了测试的等待缺口：`waitPlayerTurn()` 只等 `active.side===0`，不等 `busy` 清空，而 `retreat()`/`defendAction()`/`castSpell()` 都有 `if (this.busy) return` 守卫，会静默失败。已改为同时等 `!busy` 并处理 `over`。顺带修了同一文件里 `Math.random = () => 0.5` 覆盖后从不恢复、污染后续所有随机性的问题 |
 | P3 | **战斗 AI 太笨** | **已重写**（2026-07-28）。旧 AI 三个短板：远程永远射最近、近战永远打 adj[0]（数组顺序=随机）、移动只看距离。新增 `scoreTarget()` 统一打分（预期伤害 + 击杀奖励 + 威胁权重 − 反击惩罚）与 `threatOf()` 威胁评估（输出×存活量，射手×1.35、飞行×1.15）；移动改为评估「移动到某格 + 攻击某目标」的组合收益，且己方射手不会主动贴脸（近战伤害减半）。回归测试 `tests/homm_e2e8.mjs` 7 项 |
 | P2 | **战场云遮挡视野** | **已修**。云原本撒在与相机活动球完全重叠的方盒里（实测 48.3% 机位会挡）。改环形远景分布（半径 45-70、高度 22-34），实测遮挡率 0% |
 | P1 | **SW 的 CDN 分支可能永不 settle** | **已修**（2026-07-28）。无缓存时 `.catch(() => cached)` 会 resolve 成 undefined 导致 respondWith 失败；网络不响应也不 reject 时永久挂起。加 8 秒超时兜底 + 保证任何分支都返回真实 Response（兜底 504） |
@@ -762,6 +958,38 @@ prompt 关键词：`medieval, fantasy, orchestral, instrumental, loopable, game 
 
 **已固化为回归测试 `tests/homm_e2e7.mjs`（19 项）**：检查 glb 模型有独立 animNode + 英雄与战场单位各八方向朝向。
 ⚠ **只测东西向发现不了这个 bug**（东西南误差本来就是 0）——这正是它此前长期潜伏的原因，所以必须八方向全测。
+
+---
+
+### 8.4 下一步建议（2026-08-03 交接）
+
+按**性价比**排序，不按原优先级：
+
+**0. 先完整试玩一遍（最推荐，成本最低）**
+
+所有真实 bug 都是靠人工试玩发现的——倒着走、云挡视野、音质差、循环卡顿，
+**135 项自动化测试一个都没抓到**，因为它们全是体感问题。
+尤其战斗 AI 刚重写（§8.2），敌人会集火残血、优先杀射手、避开反击，
+**手感变化很大，可能明显变难**，平衡性需要真人判断。数值在 `difficulty.js` 里调。
+
+**1. 城镇建设（撑起中期目标感）**
+
+现在城堡只是个招募面板。加建筑树：
+- **魔法塔** → 解锁法术等级（顺带解决 §8.1 里「法术等级」那条）
+- **市场** → 资源互换，解决「木材多矿石少」的死局
+- **瞭望塔** → 扩大视野，与战争迷雾联动
+
+有了建筑树，「这回合攒钱建什么」才成为每天的决策点。
+
+**2. 地图多样性（复玩性）**
+
+`map.js` 里起点 / 城堡 / Boss / 敌方城堡的位置是**写死坐标**，只有地形随机，
+玩第二遍就没新鲜感。低成本方案：锚点也随机化 + 加「地图种子」输入框，玩家可分享种子。
+
+**3. 多英雄（策略维度翻倍，但改动面大）**
+
+`world.hero` 目前是单例，存档结构、UI、回合流转都要改，
+**工作量约等于前两项之和**，建议放最后。
 
 ---
 
