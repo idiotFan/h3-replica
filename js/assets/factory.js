@@ -361,9 +361,18 @@ export function createHero(faction = 'player') {
  * @param {'player'|'enemy'} faction
  */
 export function createCastle(faction = 'player') {
+  // ★ 2026-08-03 应用户要求回退到原程序化城堡模型。
+  // 用户在线上观察到「放大缩小画面时城堡才显示」。排查记录：
+  //   - glb 的包围球健康（声明球与实算球一致、球心零偏差、半径比 1.0~1.12），
+  //     不是视锥剔除的包围体问题；
+  //   - 症状与迷雾 depthTest:false 时代的「远处黑雾糊住高物体」高度吻合
+  //     （该 bug 已另行修复），也可能叠加了 SW 缓存供旧 js 的因素。
+  // 先回退掉最大变量（模型）观察；若回退后症状消失再逐步恢复 glb 排查。
+  // 恢复方法：把下面的 USE_GLB 改回 true 即可。
+  const USE_GLB = false;
   const key = faction === 'enemy' ? 'castle_enemy' : 'castle_player';
   const def = BUILDING_ASSETS[key];
-  if (def && hasGlb(def)) {
+  if (USE_GLB && def && hasGlb(def)) {
     const gltf = getCached(def.path);
     if (gltf) {
       const root = cloneGltfScene(gltf);
