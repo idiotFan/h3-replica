@@ -508,6 +508,8 @@ export class WorldMap {
     trunk.castShadow = leaf.castShadow = true;
     let i = 0;
     const leafColor = new THREE.Color();
+    // 记录每个实例属于哪一格 + 原始矩阵，供迷雾按格隐藏（见 _updateVegetationFog）
+    const treeTileOf = new Int32Array(count * 2);
     for (const [x, y] of treeTiles) {
       const n = randInt(1, 3);
       const w = this.tileWorld(x, y);
@@ -522,14 +524,19 @@ export class WorldMap {
         dummy.updateMatrix();
         leaf.setMatrixAt(i, dummy.matrix);
         leaf.setColorAt(i, leafColor.setHSL(0.3 + Math.random() * 0.05, 0.45, 0.22 + Math.random() * 0.12));
+        treeTileOf[i * 2] = x; treeTileOf[i * 2 + 1] = y;
         i++;
       }
     }
     leaf.instanceColor.needsUpdate = true;
     this.scene.add(trunk, leaf);
+    this._veg = this._veg || [];
+    this._veg.push({ meshes: [trunk, leaf], tileOf: treeTileOf,
+                     base: [trunk.instanceMatrix.array.slice(), leaf.instanceMatrix.array.slice()] });
     // 山地岩石
     const rocks = new THREE.InstancedMesh(new THREE.DodecahedronGeometry(0.45), new THREE.MeshLambertMaterial({ color: 0x7a7d81 }), rockTiles.length);
     rocks.castShadow = true;
+    const rockTileOf = new Int32Array(rockTiles.length * 2);
     rockTiles.forEach(([x, y], idx) => {
       const w = this.tileWorld(x, y);
       dummy.position.set(w.x + rand(-0.4, 0.4), w.y + 0.15, w.z + rand(-0.4, 0.4));
@@ -537,8 +544,11 @@ export class WorldMap {
       dummy.rotation.set(rand(0, 3), rand(0, 3), rand(0, 3));
       dummy.updateMatrix();
       rocks.setMatrixAt(idx, dummy.matrix);
+      rockTileOf[idx * 2] = x; rockTileOf[idx * 2 + 1] = y;
     });
     this.scene.add(rocks);
+    this._veg = this._veg || [];
+    this._veg.push({ meshes: [rocks], tileOf: rockTileOf, base: [rocks.instanceMatrix.array.slice()] });
   }
 
   // ---------- 对象放置 ----------
@@ -1065,19 +1075,44 @@ export class WorldMap {
     tex.generateMipmaps = true;
     tex.flipY = true; // canvas 顶行 ↔ tile y=0（与 PlaneGeometry 默认 UV 对齐）
     this._fogTex = tex;
-    // 覆盖全图的平面（与地形同尺寸同朝向）
-    const geo = new THREE.PlaneGeometry(MW * TILE, MH * TILE);
+    // 覆盖全图的平面 —— 必须与地形【同尺寸、同细分、同起伏】。
+    //
+    // 曾经是一张压在 y=0.12 的纯平面。配 depthTest=false 时它糊住城堡（见下方材质注释）；
+    // 只把 depthTest 改成 true 又会露馅：地形有起伏，凡是高于 0.12 的地方地形赢了深度
+    // 测试，未探索区反而显出来。所以平面必须贴着地形走 —— 复用 this.vh 的逐顶点高度，
+    // 抬高一个固定薄层。这样雾既能被更近的高物体正确遮挡，又能严丝合缝盖住地面。
+    const geo = new THREE.PlaneGeometry(MW * TILE, MH * TILE, MW, MH);
     geo.rotateX(-Math.PI / 2);
-    // depthTest=false：雾始终覆盖在最上层，未探索区域的森林/建筑被完全遮住；
-    // 靠 alpha 区分层次：未探索近不透明、已探索半透明（树冠隐约可见）、可见完全透明。
-    // 平滑过渡由 SS=16 + Mipmap 双线性过滤保证，不依赖 depthTest。
+    {
+      const pos = geo.attributes.position;
+      const LIFT = 0.12;                       // 贴地薄层，避免与地形 z-fighting
+      for (let i = 0; i < pos.count; i++) {
+        const gx = clamp(Math.round(pos.getX(i) / TILE + MW / 2), 0, MW);
+        const gz = clamp(Math.round(pos.getZ(i) / TILE + MH / 2), 0, MH);
+        pos.setY(i, (this.vh[gx] && this.vh[gx][gz] !== undefined ? this.vh[gx][gz] : 0) + LIFT);
+      }
+      pos.needsUpdate = true;
+      geo.computeVertexNormals();
+    }
+    // ⚠ depthTest 必须为 true。
+    //
+    // 曾经设成 false（想让未探索区的树/建筑被雾完全盖住），但那会让这张位于
+    // y=0.12 的平面**无视深度、画在所有物体之上**：从低角度看时，远处未探索格
+    // 的近黑色雾会糊在投影到同一屏幕位置的近处高物体上。城堡是场上最高的物体，
+    // 受害最严重——实测城堡区域纯黑像素占比 25.9%，看起来就是「一个大黑块」，
+    // 开启 depthTest 后降到 12.3%（剩下的才是城堡背后真正该黑的背景）。
+    //
+    // 未探索区的遮挡改由两条各司其职的机制保证：
+    //   1. 对象（城堡/矿场/野怪）—— updateFog 里 `o.mesh.visible = expl`，本就已隐藏
+    //   2. 植被（树/岩石，InstancedMesh 无法按格 visible）—— _updateVegetationFog()
+    //      把未探索格的实例缩放归零
     const mat = new THREE.MeshBasicMaterial({
-      map: tex, transparent: true, depthWrite: false, depthTest: false,
+      map: tex, transparent: true, depthWrite: false, depthTest: true,
       color: 0xffffff,
     });
     this.fogMesh = new THREE.Mesh(geo, mat);
     this.fogMesh.renderOrder = 999; // 透明队列中最后绘制，覆盖所有物体
-    this.fogMesh.position.y = 0.12;
+    // position.y 保持 0：高度已烘进顶点（见上方），再整体抬高会破坏贴合
     this.scene.add(this.fogMesh);
     this.updateFog(true);
   }
@@ -1109,6 +1144,7 @@ export class WorldMap {
           if ((x - castle.x) ** 2 + (y - castle.y) ** 2 <= r2) this.explored[x][y] = true;
     }
     this._drawFogTexture();
+    this._updateVegetationFog();
     // 对象可见性：敌方英雄仅当前可见显示，其余已探索即显示
     for (const o of this.objects.values()) {
       if (!o.mesh) continue;
@@ -1118,6 +1154,34 @@ export class WorldMap {
       if (o.label) o.label.visible = o.mesh.visible;
     }
   }
+  // 按已探索状态隐藏植被实例。
+  // InstancedMesh 是单次 draw call，没法像普通对象那样按格 .visible=false，
+  // 所以改写实例矩阵：未探索格的实例缩放归零（等于不可见），已探索恢复原矩阵。
+  // 只在状态真正变化时写回 GPU，避免每次移动都全量上传。
+  _updateVegetationFog() {
+    if (!this._veg || !this.explored) return;
+    for (const grp of this._veg) {
+      const { meshes, tileOf, base } = grp;
+      const n = tileOf.length / 2;
+      let dirty = false;
+      grp.hidden = grp.hidden || new Uint8Array(n);
+      for (let i = 0; i < n; i++) {
+        const x = tileOf[i * 2], y = tileOf[i * 2 + 1];
+        const expl = this.explored[x] && this.explored[x][y];
+        const want = expl ? 0 : 1;
+        if (grp.hidden[i] === want) continue;
+        grp.hidden[i] = want;
+        dirty = true;
+        for (let m = 0; m < meshes.length; m++) {
+          const arr = meshes[m].instanceMatrix.array, src = base[m], o = i * 16;
+          if (want) { for (let k = 0; k < 16; k++) arr[o + k] = 0; }   // 全零矩阵 = 退化不可见
+          else { for (let k = 0; k < 16; k++) arr[o + k] = src[o + k]; }
+        }
+      }
+      if (dirty) for (const m of meshes) m.instanceMatrix.needsUpdate = true;
+    }
+  }
+
   // 将 explored/visible 状态绘制到迷雾画布
   _drawFogTexture() {
     const ctx = this._fogCtx, SS = this._fogSS;

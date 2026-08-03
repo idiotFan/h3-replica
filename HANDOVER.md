@@ -10,7 +10,7 @@
 | | |
 |---|---|
 | 代码 | ~7400 行 JS，本地 / Gitee / 线上**三方同步** |
-| 测试 | **8 轮 135 项**端到端 + 建筑视觉回归（`tests/homm_buildings_visual.mjs`） |
+| 测试 | **9 轮 144 项**端到端 + 建筑视觉回归（`tests/homm_buildings_visual.mjs`） |
 | 美术 | **22 个模型全部 Meshy 生成**（17 角色 + 5 建筑），已统一 lowpoly 风格 |
 | 音频 | BGM 46s 无缝循环 + 18 个 Kenney CC0 音效（见 §4.8） |
 | 建筑 | 5 个建筑已从 Blender 原语换为 Meshy 版，**但城堡渲染发黑问题未解决**（见 §8.1 P0） |
@@ -109,6 +109,7 @@ node tests/homm_e2e.mjs                                           # 核心功能
 node tests/homm_e2e6.mjs                                          # 难度机制（警戒圈/成长/禁斜穿）
 node tests/homm_e2e7.mjs                                          # 模型朝向（八方向，防「倒着走/横着走」回归）
 node tests/homm_e2e8.mjs                                          # 战斗 AI 战术决策（集火残血/优先射手/避反击）
+node tests/homm_e2e9.mjs                                          # 战争迷雾遮挡（防「城堡变大黑块」回归）
 node tests/homm_shot.mjs "http://localhost:8000/?smoke=battle" 12 /tmp/shot.png  # 截图
 ```
 6 轮 e2e 共 **110 项断言**（按 `check()` 调用数实测：e2e 23 / e2e2 18 / e2e3 23 / e2e4 20 /
@@ -893,6 +894,7 @@ ssh rtx3060                      # 已配好别名与公钥，免密
 | P1 | **BGM 音质差** | **已解决**。换成 Kevin MacLeod《The Britons》（FreePD 公共领域），45s→304s、32kHz→44.1kHz。绕过的弯路：AudioGen 只有 medium 一个公开版本，且固定 16kHz 输出，模型再大也救不了高频 |
 | P2 | **音效质量差 / 8 个音效从未触发** | **已解决**。补接 death/arrow/fireball/block/turn/hurt 六处调用点；音效换 Kenney CC0 素材，16kHz→44.1kHz，体积反而更小 |
 | — | **e2e4 撤退用例 flaky（3 次挂 2 次）** | **已修**（2026-08-03）。战斗 AI 重写后 AI 移动更频繁、动画更长，暴露了测试的等待缺口：`waitPlayerTurn()` 只等 `active.side===0`，不等 `busy` 清空，而 `retreat()`/`defendAction()`/`castSpell()` 都有 `if (this.busy) return` 守卫，会静默失败。已改为同时等 `!busy` 并处理 `over`。顺带修了同一文件里 `Math.random = () => 0.5` 覆盖后从不恢复、污染后续所有随机性的问题 |
+| P1 | **城堡显示为「大黑块」** | **已修**（2026-08-03）。根因不在城堡模型/材质（贴图、法线、颜色实测全正常），而在战争迷雾平面：`depthTest:false` 让它无视深度画在所有物体之上，且平面压在固定 `y=0.12` 与地形起伏无关。低角度下远处未探索格的近黑色雾会糊到投影位置重合的近处高物体上，城堡最高故受害最重（区域纯黑占比 30%）。三处配套修复：①`depthTest` 改 true ②迷雾平面改为贴合地形起伏（复用 `this.vh` 逐顶点高度，否则地形高于 0.12 处会赢深度测试导致未探索区反而露出）③未探索区植被由 `_updateVegetationFog()` 清零实例矩阵来隐藏（InstancedMesh 无法按格 `visible`；对象本就有 `o.mesh.visible = expl`）。回归测试 `tests/homm_e2e9.mjs` 9 项 |
 | P3 | **战斗 AI 太笨** | **已重写**（2026-07-28）。旧 AI 三个短板：远程永远射最近、近战永远打 adj[0]（数组顺序=随机）、移动只看距离。新增 `scoreTarget()` 统一打分（预期伤害 + 击杀奖励 + 威胁权重 − 反击惩罚）与 `threatOf()` 威胁评估（输出×存活量，射手×1.35、飞行×1.15）；移动改为评估「移动到某格 + 攻击某目标」的组合收益，且己方射手不会主动贴脸（近战伤害减半）。回归测试 `tests/homm_e2e8.mjs` 7 项 |
 | P2 | **战场云遮挡视野** | **已修**。云原本撒在与相机活动球完全重叠的方盒里（实测 48.3% 机位会挡）。改环形远景分布（半径 45-70、高度 22-34），实测遮挡率 0% |
 | P1 | **SW 的 CDN 分支可能永不 settle** | **已修**（2026-07-28）。无缓存时 `.catch(() => cached)` 会 resolve 成 undefined 导致 respondWith 失败；网络不响应也不 reject 时永久挂起。加 8 秒超时兜底 + 保证任何分支都返回真实 Response（兜底 504） |
