@@ -797,7 +797,14 @@ prompt 关键词：`medieval, fantasy, orchestral, instrumental, loopable, game 
 
 ---
 
-### 7.3 minimax-music —— MiniMax music-3.0 生成音乐 ★ 2026-08-03 新增（推荐）
+### 7.3 minimax-music —— MiniMax music-3.0 生成音乐 ★ 2026-08-03 新增
+
+> ⛔ **2026-08-03 实测：MiniMax Music API 已对新用户关闭**（付费/免费模型均返回 HTTP 410 /
+> status 2153「仅存量付费客户可继续使用」；海外端点对国内 key 返回 2049）。
+> 当前账号**调不通**。skill 本身保留，两种情况下仍有用：① 账号属存量付费客户；
+> ② 将来官方重新开放。否则音乐的替代路径见 skill 内「坑 #9」：网页版 MiniMax Audio（手动）
+> 或开源 MiniMax-Music3 本地推理（可考虑放到 §7.4 那台 RTX 3060 上跑）。
+> **现阶段 BGM 用的是用户自备的 `h3_bgm_map_loop.mp3`，需求已满足，不急于换。**
 
 **位置**：`~/.claude/skills/minimax-music/`（用户级全局 skill，**不在本仓库**，换机器要单独同步）
 **触发**：对 Claude 说「生成 BGM」「做首纯音乐」「游戏配乐」「循环 BGM」等即可自动调用。
